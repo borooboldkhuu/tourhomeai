@@ -1,0 +1,7 @@
+-- Optional demo data. Replace :agent_id with a real auth user id first.
+-- select id from auth.users;
+--
+-- insert into public.properties (agent_id, slug, title, description, price, location, area, rooms, status, published_at)
+-- values ('00000000-0000-0000-0000-000000000000', 'demo-3r-khan-uul',
+--         '3 өрөө тансаг байр — Хан-Уул', 'Шинэ ашиглалтад орсон, тавилгатай.',
+--         450000000, 'Хан-Уул дүүрэг, 15-р хороо', 92.5, 3, 'published', now());
