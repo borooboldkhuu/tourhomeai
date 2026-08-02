@@ -3,6 +3,7 @@ export interface PannellumViewer {
   getScene(): string;
   destroy(): void;
   toggleFullscreen(): void;
+  resize?(): void;
   setYaw(yaw: number): void;
   setPitch(pitch: number): void;
   getYaw(): number;

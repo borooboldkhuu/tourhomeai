@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Compass, Loader2, Maximize, Minus, Plus, RotateCw } from "lucide-react";
+import { Compass, Loader2, Maximize, Minimize, Minus, Plus, RotateCw, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { PropertyTour } from "@/types/database.types";
 import type { PannellumConfig, PannellumScene, PannellumViewer } from "@/types/pannellum";
@@ -49,12 +49,14 @@ interface Props {
 
 export function PanoramaViewer({ tours, className, onSceneChange }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
+  const wrapperRef = useRef<HTMLDivElement>(null);
   const viewerRef = useRef<PannellumViewer | null>(null);
   const [ready, setReady] = useState(false);
   const [failed, setFailed] = useState(false);
   const [activeScene, setActiveScene] = useState(tours[0]?.scene_key ?? "");
   const [rotating, setRotating] = useState(false);
   const [zoomPct, setZoomPct] = useState(0);
+  const [fullscreen, setFullscreen] = useState(false);
 
   useEffect(() => {
     if (!tours.length || !containerRef.current) return;
@@ -133,6 +135,53 @@ export function PanoramaViewer({ tours, className, onSceneChange }: Props) {
     onSceneChange?.(key);
   }, [onSceneChange]);
 
+  /**
+   * iOS Safari has no Fullscreen API for ordinary elements, so the reliable
+   * approach is a fixed overlay. Where the native API exists we also request
+   * it, purely to hide the browser chrome.
+   */
+  const enterFullscreen = useCallback(() => {
+    setFullscreen(true);
+    document.body.style.overflow = "hidden";
+    const el = wrapperRef.current;
+    if (el?.requestFullscreen) void el.requestFullscreen().catch(() => {});
+  }, []);
+
+  const exitFullscreen = useCallback(() => {
+    setFullscreen(false);
+    document.body.style.overflow = "";
+    if (document.fullscreenElement && document.exitFullscreen) {
+      void document.exitFullscreen().catch(() => {});
+    }
+  }, []);
+
+  const toggleFullscreen = useCallback(() => {
+    if (fullscreen) exitFullscreen();
+    else enterFullscreen();
+  }, [fullscreen, enterFullscreen, exitFullscreen]);
+
+  // Pannellum needs a nudge after the container changes size.
+  useEffect(() => {
+    if (!ready) return;
+    const id = setTimeout(() => viewerRef.current?.resize?.(), 120);
+    return () => clearTimeout(id);
+  }, [fullscreen, ready]);
+
+  // Escape, the Android back gesture and the native exit all close the overlay.
+  useEffect(() => {
+    if (!fullscreen) return;
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && exitFullscreen();
+    const onNative = () => { if (!document.fullscreenElement) setFullscreen(false); };
+    window.addEventListener("keydown", onKey);
+    document.addEventListener("fullscreenchange", onNative);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      document.removeEventListener("fullscreenchange", onNative);
+    };
+  }, [fullscreen, exitFullscreen]);
+
+  useEffect(() => () => { document.body.style.overflow = ""; }, []);
+
   const zoom = (delta: number) => {
     const v = viewerRef.current;
     if (!v) return;
@@ -161,8 +210,16 @@ export function PanoramaViewer({ tours, className, onSceneChange }: Props) {
   if (!tours.length) return null;
 
   return (
-    <div className={cn("relative h-full w-full overflow-hidden bg-neutral-950", className)}>
-      <div ref={containerRef} className="h-full w-full" onDoubleClick={toggleZoom} />
+    <div
+      ref={wrapperRef}
+      className={cn(
+        "relative overflow-hidden bg-neutral-950",
+        fullscreen ? "fixed inset-0 z-[80] h-[100dvh] w-screen" : "h-full w-full",
+        className,
+      )}
+    >
+      {/* touch-none keeps pinch and drag inside the viewer instead of scrolling the page */}
+      <div ref={containerRef} className="h-full w-full touch-none" onDoubleClick={toggleZoom} />
 
       {!ready && !failed && (
         <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-neutral-950 text-white/70">
@@ -176,6 +233,16 @@ export function PanoramaViewer({ tours, className, onSceneChange }: Props) {
           <Compass className="h-6 w-6" />
           <p className="text-sm">Үзүүлэлт ачаалж чадсангүй. Хуудсаа дахин ачаална уу.</p>
         </div>
+      )}
+
+      {/* First-time hint on touch devices */}
+      {ready && !fullscreen && (
+        <button
+          onClick={enterFullscreen}
+          className="absolute bottom-[max(4.75rem,calc(env(safe-area-inset-bottom)+4rem))] left-1/2 -translate-x-1/2 rounded-full border border-white/15 bg-black/45 px-4 py-2 text-xs font-medium text-white/90 backdrop-blur-xl sm:hidden"
+        >
+          Бүтэн дэлгэцээр үзэх
+        </button>
       )}
 
       {/* Room switcher */}
@@ -200,23 +267,40 @@ export function PanoramaViewer({ tours, className, onSceneChange }: Props) {
         </div>
       )}
 
+      {/* Close */}
+      {fullscreen && (
+        <button
+          onClick={exitFullscreen}
+          aria-label="Хаах"
+          className="absolute right-4 top-[max(1rem,env(safe-area-inset-top))] z-10 grid h-11 w-11 place-items-center rounded-full border border-white/15 bg-black/50 text-white backdrop-blur-xl transition hover:bg-black/70"
+        >
+          <X className="h-5 w-5" />
+        </button>
+      )}
+
       {/* Zoom read-out */}
       {ready && zoomPct > 2 && (
-        <div className="pointer-events-none absolute left-4 top-4 rounded-full border border-white/15 bg-black/40 px-3 py-1.5 text-xs text-white/90 backdrop-blur-xl">
+        <div className={cn(
+          "pointer-events-none absolute left-4 rounded-full border border-white/15 bg-black/40 px-3 py-1.5 text-xs text-white/90 backdrop-blur-xl",
+          fullscreen ? "top-[max(1rem,env(safe-area-inset-top))]" : "top-4",
+        )}>
           {zoomPct}% ойртсон
         </div>
       )}
 
       {/* Controls */}
       {ready && (
-        <div className="absolute right-4 top-4 flex flex-col gap-1.5">
+        <div className={cn(
+          "absolute right-4 flex flex-col gap-1.5",
+          fullscreen ? "top-[max(4.5rem,calc(env(safe-area-inset-top)+3.5rem))]" : "top-4",
+        )}>
           <ViewerButton onClick={() => zoom(-12)} label="Ойртуулах"><Plus /></ViewerButton>
           <ViewerButton onClick={() => zoom(12)} label="Холдуулах"><Minus /></ViewerButton>
           <ViewerButton onClick={toggleRotate} label="Автомат эргэлт">
             <RotateCw className={cn(rotating && "animate-spin")} />
           </ViewerButton>
-          <ViewerButton onClick={() => viewerRef.current?.toggleFullscreen()} label="Бүтэн дэлгэц">
-            <Maximize />
+          <ViewerButton onClick={toggleFullscreen} label={fullscreen ? "Багасгах" : "Бүтэн дэлгэц"}>
+            {fullscreen ? <Minimize /> : <Maximize />}
           </ViewerButton>
         </div>
       )}
