@@ -113,12 +113,6 @@ export function tourLimitOf(plan: PlanId): number | null {
 /** Days a free trial listing stays visible — must match public.trial_window(). */
 export const TRIAL_DAYS = 7;
 
-export const BANK = {
-  name: "Хаан банк",
-  account: "5000-1234-5678",
-  holder: "Аялуун Проперти ХХК",
-} as const;
-
 export const MAX_IMAGE_MB = 25;
-export const MAX_PANORAMA_MB = 50;
+export const MAX_PANORAMA_MB = 80;
 export const MAX_VIDEO_MB = 200;

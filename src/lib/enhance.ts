@@ -42,45 +42,66 @@ export function enhanceImageData(img: ImageData, options: EnhanceOptions = {}): 
   const { width: W, height: H, data: src } = img;
   const out = new Uint8ClampedArray(src);
 
-  const idx = (x: number, y: number) => (y * W + ((x % W) + W) % W) * 4;
-
   // ---- 1. edge-aware denoise (bilateral-lite over a 3×3 window) ----
+  // The weight only depends on |luma difference|, so it is a 256-entry lookup
+  // instead of an exp() per tap — that alone is most of the speed here.
   if (o.denoise > 0) {
     const sigma = 26 / Math.max(0.05, o.denoise);
+    const lut = new Float32Array(256);
+    for (let d = 0; d < 256; d++) lut[d] = Math.exp(-(d * d) / (2 * sigma * sigma));
+
+    const lum = new Float32Array(W * H);
+    for (let i = 0, p = 0; p < W * H; p++, i += 4) lum[p] = luma(src, i);
+
     for (let y = 1; y < H - 1; y++) {
       for (let x = 0; x < W; x++) {
-        const c = idx(x, y);
-        const lc = luma(src, c);
-        let wsum = 0;
-        const acc = [0, 0, 0];
+        const p = y * W + x;
+        const c = p * 4;
+        const lc = lum[p];
+        let wsum = 0, a0 = 0, a1 = 0, a2 = 0;
+
         for (let dy = -1; dy <= 1; dy++) {
+          const row = (y + dy) * W;
           for (let dx = -1; dx <= 1; dx++) {
-            const n = idx(x + dx, y + dy);
-            const diff = luma(src, n) - lc;
-            const w = Math.exp(-(diff * diff) / (2 * sigma * sigma));
+            const q = row + (((x + dx) % W) + W) % W;
+            const w = lut[(Math.abs(lum[q] - lc) | 0) & 255];
+            const n = q * 4;
             wsum += w;
-            acc[0] += src[n] * w; acc[1] += src[n + 1] * w; acc[2] += src[n + 2] * w;
+            a0 += src[n] * w; a1 += src[n + 1] * w; a2 += src[n + 2] * w;
           }
         }
-        const blend = o.denoise;
-        for (let ch = 0; ch < 3; ch++) {
-          out[c + ch] = src[c + ch] * (1 - blend) + (acc[ch] / wsum) * blend;
-        }
+        const b = o.denoise, inv = 1 / wsum;
+        out[c] = src[c] * (1 - b) + a0 * inv * b;
+        out[c + 1] = src[c + 1] * (1 - b) + a1 * inv * b;
+        out[c + 2] = src[c + 2] * (1 - b) + a2 * inv * b;
       }
     }
   }
 
-  // ---- 2. unsharp mask against a 3×3 box blur of the denoised image ----
+  // ---- 2. unsharp mask, separable 3×3 box blur (6 taps instead of 27) ----
   if (o.sharpen > 0) {
     const base = new Uint8ClampedArray(out);
+    const tmp = new Float32Array(W * H * 3);
+
+    for (let y = 0; y < H; y++) {
+      for (let x = 0; x < W; x++) {
+        const o1 = (y * W + x) * 3;
+        const l = (y * W + (((x - 1) % W) + W) % W) * 4;
+        const c = (y * W + x) * 4;
+        const r = (y * W + (x + 1) % W) * 4;
+        tmp[o1] = (base[l] + base[c] + base[r]) / 3;
+        tmp[o1 + 1] = (base[l + 1] + base[c + 1] + base[r + 1]) / 3;
+        tmp[o1 + 2] = (base[l + 2] + base[c + 2] + base[r + 2]) / 3;
+      }
+    }
+
     for (let y = 1; y < H - 1; y++) {
       for (let x = 0; x < W; x++) {
-        const c = idx(x, y);
+        const p = y * W + x;
+        const c = p * 4, t = p * 3;
+        const up = t - W * 3, dn = t + W * 3;
         for (let ch = 0; ch < 3; ch++) {
-          let sum = 0;
-          for (let dy = -1; dy <= 1; dy++)
-            for (let dx = -1; dx <= 1; dx++) sum += base[idx(x + dx, y + dy) + ch];
-          const blur = sum / 9;
+          const blur = (tmp[up + ch] + tmp[t + ch] + tmp[dn + ch]) / 3;
           out[c + ch] = base[c + ch] + (base[c + ch] - blur) * o.sharpen;
         }
       }
@@ -119,129 +140,149 @@ export function enhanceCanvas(canvas: HTMLCanvasElement, options?: EnhanceOption
   return canvas;
 }
 
-/* ---------------------------------------------------- optional AI upscale -- */
+/* ------------------------------------------------------------ AI upscale -- */
 
-const ORT_CDN = "https://cdnjs.cloudflare.com/ajax/libs/onnxruntime-web/1.20.1/ort.min.js";
+/**
+ * Free, on-device 2× super-resolution.
+ *
+ * Model: ESRGAN-slim from UpscalerJS — MIT licensed, 900 KB of weights served
+ * by jsDelivr. No account, no API key, no server: TensorFlow.js runs it in the
+ * browser, so the panorama never leaves the phone.
+ *
+ *   https://cdn.jsdelivr.net/npm/@upscalerjs/esrgan-slim@1.0.0/models/x2/model.json
+ *
+ * The network is fully convolutional (input [null, null, null, 3]) so it takes
+ * any tile size; we feed overlapping tiles and crop the seams away.
+ */
+const TFJS_CDN = "https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.11.0/dist/tf.min.js";
+const MODEL_URL =
+  process.env.NEXT_PUBLIC_SR_MODEL_URL ||
+  "https://cdn.jsdelivr.net/npm/@upscalerjs/esrgan-slim@1.0.0/models/x2/model.json";
 
-interface OrtTensor { data: Float32Array }
-interface OrtSession {
-  inputNames: string[];
-  outputNames: string[];
-  run(feeds: Record<string, OrtTensor>): Promise<Record<string, OrtTensor>>;
+/** Upscaling a 4096-wide sphere would need ~130 MB of pixels — not worth it. */
+const MAX_INPUT_WIDTH = 2048;
+
+interface TfTensor {
+  dispose(): void;
+  data(): Promise<Float32Array>;
+  shape: number[];
 }
-interface OrtNamespace {
-  env: { wasm: { wasmPaths: string; numThreads: number } };
-  Tensor: new (type: string, data: Float32Array, dims: number[]) => OrtTensor;
-  InferenceSession: { create(url: string, opts?: Record<string, unknown>): Promise<OrtSession> };
+interface TfNamespace {
+  ready(): Promise<void>;
+  loadLayersModel(url: string): Promise<{ predict(t: TfTensor): TfTensor }>;
+  browser: { fromPixels(src: ImageData | HTMLCanvasElement): TfTensor };
+  tidy<T>(fn: () => T): T;
+  div(a: TfTensor, b: number): TfTensor;
+  mul(a: TfTensor, b: number): TfTensor;
+  clipByValue(a: TfTensor, min: number, max: number): TfTensor;
+  expandDims(a: TfTensor, axis: number): TfTensor;
+  squeeze(a: TfTensor): TfTensor;
+  setBackend(name: string): Promise<boolean>;
 }
 
 declare global {
-  interface Window { ort?: OrtNamespace }
+  interface Window { tf?: TfNamespace }
 }
 
-/** Is an on-device model configured? */
-export function aiUpscaleAvailable() {
-  return Boolean(process.env.NEXT_PUBLIC_SR_MODEL_URL);
+/** Always available — the model is public and needs no configuration. */
+export function aiUpscaleAvailable(width = 0) {
+  if (process.env.NEXT_PUBLIC_DISABLE_AI === "1") return false;
+  return width === 0 || width <= MAX_INPUT_WIDTH;
 }
 
-function loadOrt(): Promise<OrtNamespace> {
+function loadScript(src: string): Promise<void> {
   return new Promise((resolve, reject) => {
-    if (window.ort) return resolve(window.ort);
-    const s = document.createElement("script");
-    s.src = ORT_CDN;
-    s.onload = () => (window.ort ? resolve(window.ort) : reject(new Error("ort missing")));
-    s.onerror = () => reject(new Error("onnxruntime-web ачаалагдсангүй"));
-    document.head.appendChild(s);
+    if (document.querySelector(`script[src="${src}"]`)) return resolve();
+    const el = document.createElement("script");
+    el.src = src;
+    el.onload = () => resolve();
+    el.onerror = () => reject(new Error("TensorFlow.js ачаалагдсангүй"));
+    document.head.appendChild(el);
   });
 }
 
-let sessionPromise: Promise<OrtSession> | null = null;
+let modelPromise: Promise<{ predict(t: TfTensor): TfTensor }> | null = null;
 
 /**
- * Tiled super-resolution on the device. The model must be a plain
- * image-to-image ONNX network with NCHW float input in 0..1.
- * Returns a new canvas, or null when no model is configured.
+ * Doubles the resolution of a panorama with the ESRGAN-slim network.
+ * Returns null when the input is already large or anything goes wrong —
+ * callers keep the original image in that case.
  */
 export async function aiUpscale(
   canvas: HTMLCanvasElement,
   onProgress?: (done: number, total: number) => void,
-  tile = 256,
+  tile = 192,
+  overlap = 8,
 ): Promise<HTMLCanvasElement | null> {
-  const url = process.env.NEXT_PUBLIC_SR_MODEL_URL;
-  if (!url) return null;
+  if (!aiUpscaleAvailable(canvas.width)) return null;
 
-  const ort = await loadOrt();
-  ort.env.wasm.wasmPaths = "https://cdnjs.cloudflare.com/ajax/libs/onnxruntime-web/1.20.1/";
-  ort.env.wasm.numThreads = 1;
+  await loadScript(TFJS_CDN);
+  const tf = window.tf;
+  if (!tf) return null;
+  await tf.ready();
 
-  if (!sessionPromise) {
-    sessionPromise = ort.InferenceSession.create(url, { executionProviders: ["wasm"] });
-  }
-  const session = await sessionPromise;
+  if (!modelPromise) modelPromise = tf.loadLayersModel(MODEL_URL);
+  const model = await modelPromise;
 
   const srcCtx = canvas.getContext("2d", { willReadFrequently: true })!;
-  const probe = await runTile(ort, session, srcCtx, 0, 0, tile, canvas);
-  const scale = probe.size / tile;
+  const out = document.createElement("canvas");
+  out.width = canvas.width * 2;
+  out.height = canvas.height * 2;
+  const outCtx = out.getContext("2d")!;
 
-  const outCanvas = document.createElement("canvas");
-  outCanvas.width = Math.round(canvas.width * scale);
-  outCanvas.height = Math.round(canvas.height * scale);
-  const outCtx = outCanvas.getContext("2d")!;
-  outCtx.putImageData(probe.img, 0, 0);
-
-  const cols = Math.ceil(canvas.width / tile), rows = Math.ceil(canvas.height / tile);
+  const cols = Math.ceil(canvas.width / tile);
+  const rows = Math.ceil(canvas.height / tile);
   const total = cols * rows;
-  let done = 1;
+  let done = 0;
 
   for (let ty = 0; ty < rows; ty++) {
     for (let tx = 0; tx < cols; tx++) {
-      if (tx === 0 && ty === 0) continue;
-      const { img } = await runTile(ort, session, srcCtx, tx * tile, ty * tile, tile, canvas);
-      outCtx.putImageData(img, Math.round(tx * tile * scale), Math.round(ty * tile * scale));
+      // read the tile with a margin so the convolutions have context
+      const x0 = Math.max(0, tx * tile - overlap);
+      const y0 = Math.max(0, ty * tile - overlap);
+      const x1 = Math.min(canvas.width, (tx + 1) * tile + overlap);
+      const y1 = Math.min(canvas.height, (ty + 1) * tile + overlap);
+      const patch = srcCtx.getImageData(x0, y0, x1 - x0, y1 - y0);
+
+      const result = tf.tidy(() =>
+        tf.clipByValue(
+          tf.mul(
+            tf.squeeze(
+              model.predict(tf.expandDims(tf.div(tf.browser.fromPixels(patch), 255), 0)) as TfTensor,
+            ),
+            255,
+          ),
+          0,
+          255,
+        ),
+      );
+      const [h, w] = result.shape;
+      const raw = await result.data();
+      result.dispose();
+
+      const img = new ImageData(w, h);
+      for (let i = 0, p = 0; p < w * h; p++, i += 4) {
+        img.data[i] = raw[p * 3];
+        img.data[i + 1] = raw[p * 3 + 1];
+        img.data[i + 2] = raw[p * 3 + 2];
+        img.data[i + 3] = 255;
+      }
+
+      // drop the margin, then paste at 2× coordinates
+      const cropX = (tx * tile - x0) * 2;
+      const cropY = (ty * tile - y0) * 2;
+      const keepW = Math.min(tile * 2, w - cropX);
+      const keepH = Math.min(tile * 2, h - cropY);
+
+      const tmp = document.createElement("canvas");
+      tmp.width = w; tmp.height = h;
+      tmp.getContext("2d")!.putImageData(img, 0, 0);
+      outCtx.drawImage(tmp, cropX, cropY, keepW, keepH, tx * tile * 2, ty * tile * 2, keepW, keepH);
+
       onProgress?.(++done, total);
-    }
-  }
-  return outCanvas;
-}
-
-async function runTile(
-  ort: OrtNamespace,
-  session: OrtSession,
-  ctx: CanvasRenderingContext2D,
-  x: number,
-  y: number,
-  tile: number,
-  canvas: HTMLCanvasElement,
-) {
-  const w = Math.min(tile, canvas.width - x), h = Math.min(tile, canvas.height - y);
-  const src = ctx.getImageData(x, y, w, h);
-
-  const input = new Float32Array(3 * tile * tile);
-  for (let py = 0; py < h; py++) {
-    for (let px = 0; px < w; px++) {
-      const i = (py * w + px) * 4, o = py * tile + px;
-      input[o] = src.data[i] / 255;
-      input[tile * tile + o] = src.data[i + 1] / 255;
-      input[2 * tile * tile + o] = src.data[i + 2] / 255;
+      await new Promise((r) => setTimeout(r, 0));    // keep the UI alive
     }
   }
 
-  const feeds = { [session.inputNames[0]]: new ort.Tensor("float32", input, [1, 3, tile, tile]) };
-  const result = await session.run(feeds);
-  const out = result[session.outputNames[0]].data;
-
-  const size = Math.round(Math.sqrt(out.length / 3));
-  const scale = size / tile;
-  const ow = Math.round(w * scale), oh = Math.round(h * scale);
-  const img = new ImageData(ow, oh);
-  for (let py = 0; py < oh; py++) {
-    for (let px = 0; px < ow; px++) {
-      const o = py * size + px, i = (py * ow + px) * 4;
-      img.data[i] = out[o] * 255;
-      img.data[i + 1] = out[size * size + o] * 255;
-      img.data[i + 2] = out[2 * size * size + o] * 255;
-      img.data[i + 3] = 255;
-    }
-  }
-  return { img, size };
+  return out;
 }

@@ -9,6 +9,10 @@ import type { PannellumConfig, PannellumScene, PannellumViewer } from "@/types/p
 const PANNELLUM_JS = "https://cdnjs.cloudflare.com/ajax/libs/pannellum/2.5.6/pannellum.js";
 const PANNELLUM_CSS = "https://cdnjs.cloudflare.com/ajax/libs/pannellum/2.5.6/pannellum.css";
 
+/** Pannellum stops at 50° by default, which feels like the zoom is broken. */
+const MIN_HFOV = 28;
+const MAX_HFOV = 120;
+
 function loadPannellum(): Promise<void> {
   return new Promise((resolve, reject) => {
     if (typeof window === "undefined") return reject(new Error("SSR"));
@@ -50,6 +54,7 @@ export function PanoramaViewer({ tours, className, onSceneChange }: Props) {
   const [failed, setFailed] = useState(false);
   const [activeScene, setActiveScene] = useState(tours[0]?.scene_key ?? "");
   const [rotating, setRotating] = useState(false);
+  const [zoomPct, setZoomPct] = useState(0);
 
   useEffect(() => {
     if (!tours.length || !containerRef.current) return;
@@ -64,6 +69,8 @@ export function PanoramaViewer({ tours, className, onSceneChange }: Props) {
         panorama: tour.panorama_url,
         title: tour.room_name,
         hfov: tour.hfov,
+        minHfov: MIN_HFOV,
+        maxHfov: MAX_HFOV,
         pitch: Number(tour.pitch),
         yaw: Number(tour.yaw),
         autoLoad: true,
@@ -89,6 +96,11 @@ export function PanoramaViewer({ tours, className, onSceneChange }: Props) {
         autoLoad: true,
         showControls: false,
         compass: false,
+        minHfov: MIN_HFOV,
+        maxHfov: MAX_HFOV,
+        mouseZoom: true,
+        keyboardZoom: true,
+        draggable: true,
       },
       scenes,
     };
@@ -97,6 +109,7 @@ export function PanoramaViewer({ tours, className, onSceneChange }: Props) {
       .then(() => {
         if (cancelled || !containerRef.current || !window.pannellum) return;
         viewerRef.current = window.pannellum.viewer(containerRef.current, config);
+        viewerRef.current.on("zoomchange", (hfov) => setZoomPct(hfovToPercent(Number(hfov))));
         viewerRef.current.on("scenechange", (id) => {
           const key = String(id);
           setActiveScene(key);
@@ -123,8 +136,19 @@ export function PanoramaViewer({ tours, className, onSceneChange }: Props) {
   const zoom = (delta: number) => {
     const v = viewerRef.current;
     if (!v) return;
-    v.setHfov(Math.min(120, Math.max(50, v.getHfov() + delta)));
+    const next = Math.min(MAX_HFOV, Math.max(MIN_HFOV, v.getHfov() + delta));
+    v.setHfov(next);
+    setZoomPct(hfovToPercent(next));
   };
+
+  /** Double tap / double click toggles between wide and close-up. */
+  const toggleZoom = useCallback(() => {
+    const v = viewerRef.current;
+    if (!v) return;
+    const next = v.getHfov() > (MIN_HFOV + MAX_HFOV) / 2 ? MIN_HFOV + 6 : MAX_HFOV - 10;
+    v.setHfov(next);
+    setZoomPct(hfovToPercent(next));
+  }, []);
 
   const toggleRotate = () => {
     const v = viewerRef.current;
@@ -138,7 +162,7 @@ export function PanoramaViewer({ tours, className, onSceneChange }: Props) {
 
   return (
     <div className={cn("relative h-full w-full overflow-hidden bg-neutral-950", className)}>
-      <div ref={containerRef} className="h-full w-full" />
+      <div ref={containerRef} className="h-full w-full" onDoubleClick={toggleZoom} />
 
       {!ready && !failed && (
         <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-neutral-950 text-white/70">
@@ -176,11 +200,18 @@ export function PanoramaViewer({ tours, className, onSceneChange }: Props) {
         </div>
       )}
 
+      {/* Zoom read-out */}
+      {ready && zoomPct > 2 && (
+        <div className="pointer-events-none absolute left-4 top-4 rounded-full border border-white/15 bg-black/40 px-3 py-1.5 text-xs text-white/90 backdrop-blur-xl">
+          {zoomPct}% ойртсон
+        </div>
+      )}
+
       {/* Controls */}
       {ready && (
         <div className="absolute right-4 top-4 flex flex-col gap-1.5">
-          <ViewerButton onClick={() => zoom(-10)} label="Ойртуулах"><Plus /></ViewerButton>
-          <ViewerButton onClick={() => zoom(10)} label="Холдуулах"><Minus /></ViewerButton>
+          <ViewerButton onClick={() => zoom(-12)} label="Ойртуулах"><Plus /></ViewerButton>
+          <ViewerButton onClick={() => zoom(12)} label="Холдуулах"><Minus /></ViewerButton>
           <ViewerButton onClick={toggleRotate} label="Автомат эргэлт">
             <RotateCw className={cn(rotating && "animate-spin")} />
           </ViewerButton>
@@ -191,6 +222,11 @@ export function PanoramaViewer({ tours, className, onSceneChange }: Props) {
       )}
     </div>
   );
+}
+
+/** 0 % at the widest field of view, 100 % fully zoomed in. */
+function hfovToPercent(hfov: number) {
+  return Math.round(((MAX_HFOV - hfov) / (MAX_HFOV - MIN_HFOV)) * 100);
 }
 
 function ViewerButton({

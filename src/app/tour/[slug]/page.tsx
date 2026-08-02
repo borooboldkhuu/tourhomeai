@@ -9,6 +9,7 @@ import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getEntitlement } from "@/lib/billing";
 import { PausedNotice } from "@/components/tour/paused-notice";
+import { Logo } from "@/components/shared/logo";
 import { TourHero } from "@/components/tour/tour-hero";
 import { Gallery } from "@/components/tour/gallery";
 import { ContactCard } from "@/components/tour/contact-card";
@@ -267,11 +268,12 @@ export default async function TourPage({ params }: { params: Promise<{ slug: str
 
       <footer className="border-t border-border py-8">
         <div className="mx-auto flex max-w-6xl flex-col items-center justify-between gap-3 px-4 text-sm text-muted-foreground sm:flex-row sm:px-6">
-          <p>
-            Энэхүү турыг{" "}
-            <Link href="/" className="font-medium text-foreground underline-offset-4 hover:underline">
+          <p className="flex items-center gap-2">
+            Энэхүү турыг
+            <Link href="/" className="inline-flex items-center gap-1.5 font-medium text-foreground underline-offset-4 hover:underline">
+              <Logo showText={false} className="[&_svg]:h-4 [&_svg]:w-4" />
               {SITE.name}
-            </Link>{" "}
+            </Link>
             дээр үүсгэв
           </p>
           <Link href="/register" className="transition hover:text-foreground">

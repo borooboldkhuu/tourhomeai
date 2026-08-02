@@ -28,6 +28,8 @@ export interface PannellumScene {
   panorama: string;
   title?: string;
   hfov?: number;
+  minHfov?: number;
+  maxHfov?: number;
   pitch?: number;
   yaw?: number;
   autoLoad?: boolean;
@@ -42,6 +44,11 @@ export interface PannellumConfig {
     showControls?: boolean;
     autoRotate?: number;
     compass?: boolean;
+    minHfov?: number;
+    maxHfov?: number;
+    mouseZoom?: boolean;
+    keyboardZoom?: boolean;
+    draggable?: boolean;
   };
   scenes: Record<string, PannellumScene>;
 }

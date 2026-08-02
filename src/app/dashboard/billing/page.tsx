@@ -1,11 +1,9 @@
 import type { Metadata } from "next";
-import { Check, Copy, Sparkles } from "lucide-react";
+import { Sparkles } from "lucide-react";
 import { requireUser } from "@/lib/auth";
 import { getEntitlement } from "@/lib/billing";
-import { BANK } from "@/lib/constants";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { CopyField } from "@/components/dashboard/copy-field";
 import { PlanCheckout } from "@/components/dashboard/plan-checkout";
 import { formatDate } from "@/lib/utils";
 
@@ -14,7 +12,6 @@ export const metadata: Metadata = { title: "Багц" };
 export default async function BillingPage() {
   const { profile } = await requireUser();
   const ent = getEntitlement(profile);
-  const reference = `TH-${profile.id.slice(0, 8).toUpperCase()}`;
 
   return (
     <div className="mx-auto max-w-3xl space-y-8">
@@ -62,39 +59,11 @@ export default async function BillingPage() {
         <PlanCheckout activePlan={ent.active ? profile.plan : undefined} />
       </div>
 
-      {/* manual fallback */}
-      <Card>
-        <CardHeader>
-          <CardTitle>Эсвэл дансаар шилжүүлэх</CardTitle>
-          <CardDescription>
-            Онлайн төлбөр ажиллахгүй бол дансаар шилжүүлээд гүйлгээний утга дээр доорх кодоо бичнэ үү.
-            Гараар шалгаж идэвхжүүлнэ.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          <CopyField label="Банк" value={BANK.name} />
-          <CopyField label="Данс" value={BANK.account} mono />
-          <CopyField label="Хүлээн авагч" value={BANK.holder} />
-          <CopyField label="Гүйлгээний утга" value={reference} mono highlight />
+      <p className="text-center text-xs text-muted-foreground">
+        Төлбөрийг wire.mn аюулгүй гарцаар хийнэ — банкны апп, цахим хэтэвч, QR төлбөр.
+        Асуудал гарвал {profile.email} хаягаасаа бидэн рүү бичээрэй.
+      </p>
 
-          <ul className="mt-4 space-y-2 text-sm text-muted-foreground">
-            {[
-              "Багцаа сонгоод дүнг яг таарч шилжүүлнэ",
-              "Гүйлгээний утганд заавал кодоо бичнэ",
-              "Идэвхжсэн тухай и-мэйлээр мэдэгдэнэ",
-            ].map((t) => (
-              <li key={t} className="flex items-start gap-2">
-                <Check className="mt-0.5 h-4 w-4 shrink-0" /> {t}
-              </li>
-            ))}
-          </ul>
-
-          <p className="flex items-start gap-2 pt-2 text-xs text-muted-foreground">
-            <Copy className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-            Асуудал гарвал {profile.email} хаягаасаа бидэнрүү бичээрэй.
-          </p>
-        </CardContent>
-      </Card>
     </div>
   );
 }

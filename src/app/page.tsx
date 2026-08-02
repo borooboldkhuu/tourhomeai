@@ -3,6 +3,7 @@ import { ArrowRight, Camera, QrCode, Rotate3d, Share2, ShieldCheck, Smartphone }
 import { DemoTour } from "@/components/marketing/demo-tour";
 import { Pricing } from "@/components/marketing/pricing";
 import { ThemeToggle } from "@/components/shared/theme";
+import { Logo } from "@/components/shared/logo";
 import { Button } from "@/components/ui/button";
 import { SITE } from "@/lib/constants";
 
@@ -27,8 +28,8 @@ export default function HomePage() {
       {/* Nav */}
       <header className="sticky top-0 z-40 glass hairline">
         <div className="container flex h-16 items-center justify-between">
-          <Link href="/" className="text-[15px] font-semibold tracking-tight">
-            {SITE.name}
+          <Link href="/" aria-label={SITE.name}>
+            <Logo />
           </Link>
           <nav className="hidden items-center gap-8 text-sm text-muted-foreground md:flex">
             <a href="#features" className="transition hover:text-foreground">Боломжууд</a>
@@ -121,7 +122,10 @@ export default function HomePage() {
 
       <footer className="border-t border-border py-10">
         <div className="container flex flex-col items-center justify-between gap-4 text-sm text-muted-foreground sm:flex-row">
-          <p>© {new Date().getFullYear()} {SITE.name}</p>
+          <p className="flex items-center gap-2">
+            <Logo showText={false} className="[&_svg]:h-5 [&_svg]:w-5" />
+            © {new Date().getFullYear()} {SITE.name}
+          </p>
           <div className="flex gap-6">
             <Link href="/login" className="transition hover:text-foreground">Нэвтрэх</Link>
             <Link href="/register" className="transition hover:text-foreground">Бүртгүүлэх</Link>

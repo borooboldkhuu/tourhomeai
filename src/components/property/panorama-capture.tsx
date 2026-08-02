@@ -49,6 +49,8 @@ export function PanoramaCapture({
   const [hint, setHint] = useState("");
   const [progress, setProgress] = useState("");
   const steadyCountRef = useRef(0);
+  const panoSizeRef = useRef(2048);
+  const [panoSize, setPanoSize] = useState(2048);
   const hFovRef = useRef(DEFAULT_HFOV);
   hFovRef.current = hFov;
 
@@ -81,8 +83,16 @@ export function PanoramaCapture({
       window.addEventListener("deviceorientation", onOrient);
 
       // 2. rear camera
+      // Ask for the highest sensible sensor resolution — this is the single
+      // biggest factor in how sharp the finished panorama looks. The browser
+      // silently falls back to whatever the camera actually supports.
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: { ideal: "environment" }, width: { ideal: 1280 }, height: { ideal: 720 } },
+        video: {
+          facingMode: { ideal: "environment" },
+          width: { ideal: 2560 },
+          height: { ideal: 1440 },
+          frameRate: { ideal: 30 },
+        },
         audio: false,
       });
       streamRef.current = stream;
@@ -107,7 +117,16 @@ export function PanoramaCapture({
           });
       }, 700);
 
-      stitcherRef.current = new EquirectStitcher(2048);
+      // A 2048-wide sphere cannot hold the detail of a 1440p camera: with a
+      // 65° lens each frame covers ~18 % of the width, so we need ~4096 to
+      // keep pixel parity with the sensor.
+      const longest = Math.max(video.videoWidth, video.videoHeight);
+      const memory = (navigator as Navigator & { deviceMemory?: number }).deviceMemory ?? 4;
+      const size = longest >= 1000 && memory >= 3 ? 4096 : 2048;
+      panoSizeRef.current = size;
+      setPanoSize(size);
+
+      stitcherRef.current = new EquirectStitcher(size);
       targetsRef.current = buildTargets();
       refMatRef.current = null;
       prevFwdRef.current = null;
@@ -152,7 +171,9 @@ export function PanoramaCapture({
     const stitcher = stitcherRef.current;
     if (!video || !canvas || !stitcher || !video.videoWidth) return false;
 
-    const scale = 640 / Math.max(video.videoWidth, video.videoHeight);
+    // Keep the native frame unless it is huge; 640 px was throwing away most
+    // of the sensor and was the main reason panoramas looked soft.
+    const scale = Math.min(1, 1600 / Math.max(video.videoWidth, video.videoHeight));
     const w = Math.round(video.videoWidth * scale);
     const h = Math.round(video.videoHeight * scale);
     canvas.width = w;
@@ -287,12 +308,19 @@ export function PanoramaCapture({
 
       setProgress("Цэвэрлэж, хурцлаж байна…");
       await new Promise((r) => setTimeout(r, 30));   // let the label paint
-      enhanceCanvas(canvas);
+      // A 4096-wide sphere is already low-noise per pixel, so denoise lightly
+      // there and keep the pass under a couple of seconds on a phone.
+      enhanceCanvas(canvas, canvas.width >= 4096
+        ? { denoise: 0.5, sharpen: 0.35 }
+        : { denoise: 0.9, sharpen: 0.3 });
 
-      if (aiUpscaleAvailable()) {
+      // Only worth it when the sphere is small — a 4096 capture is already sharp.
+      if (aiUpscaleAvailable(canvas.width)) {
         try {
-          setProgress("AI нягтруулж байна… (эхний удаа удаж магадгүй)");
-          const up = await aiUpscale(canvas, (d, t) => setProgress(`AI нягтруулж байна… ${d}/${t}`));
+          setProgress("AI нягтруулж байна… (модель татаж байна)");
+          const up = await aiUpscale(canvas, (d, t) =>
+            setProgress(`AI нягтруулж байна… ${Math.round((d / t) * 100)}%`),
+          );
           if (up) canvas = up;
         } catch {
           setProgress("AI алгасав — энгийн чанараар хадгалж байна");
@@ -301,7 +329,7 @@ export function PanoramaCapture({
 
       setProgress("Хадгалж байна…");
       const blob: Blob = await new Promise((resolve, reject) =>
-        canvas.toBlob((b) => (b ? resolve(b) : reject(new Error("toBlob"))), "image/jpeg", 0.9),
+        canvas.toBlob((b) => (b ? resolve(b) : reject(new Error("toBlob"))), "image/jpeg", 0.92),
       );
       const file = new File([blob], `360-${Date.now()}.jpg`, { type: "image/jpeg" });
       stop();
@@ -315,7 +343,7 @@ export function PanoramaCapture({
   function reset() {
     setHint("");
     steadyCountRef.current = 0;
-    stitcherRef.current = new EquirectStitcher(2048);
+    stitcherRef.current = new EquirectStitcher(panoSizeRef.current);
     targetsRef.current = buildTargets();
     refMatRef.current = null;
     setDone(0);
@@ -386,8 +414,9 @@ export function PanoramaCapture({
             >
               <X className="h-4 w-4" />
             </button>
-            <div className="absolute left-4 top-4 rounded-full bg-black/50 px-4 py-2 text-sm backdrop-blur">
+            <div className="absolute left-4 top-4 flex items-center gap-2 rounded-full bg-black/50 px-4 py-2 text-sm backdrop-blur">
               {done} / {total}
+              <span className="text-xs text-white/50">{panoSize === 4096 ? "· Өндөр чанар" : ""}</span>
             </div>
             {hint && (
               <div className="absolute left-1/2 top-4 -translate-x-1/2 rounded-full bg-amber-500/90 px-4 py-2 text-xs font-medium text-black">

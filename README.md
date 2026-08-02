@@ -147,17 +147,19 @@ The gyroscope supplies the camera pose for every frame (`DeviceOrientationEvent`
 
 Quality work happens in three places:
 
-- **Capture** — exposure, white balance and focus are locked once the stream settles; frames are only taken after two consecutive steady readings and must pass a variance-of-Laplacian sharpness gate, so motion blur never reaches the stitcher.
+- **Capture** — the camera is requested at up to 2560×1440 and frames are used at native size (capped at 1600 px); the sphere is built at 4096×2048 when the device can hold it, which is what makes zooming in the viewer worthwhile. Exposure, white balance and focus are locked once the stream settles; frames are only taken after two consecutive steady readings and must pass a variance-of-Laplacian sharpness gate, so motion blur never reaches the stitcher.
 - **Stitch** — every frame after the first is re-aligned against what is already on the sphere by maximising normalised cross-correlation over a three-stage yaw/pitch search (±3° → 0.07°), which cancels gyroscope drift; a per-channel gain then matches its exposure to the overlap. Sampling is bilinear and the poles are capped from the nearest captured colour.
-- **Finish** — an edge-aware denoise plus mild unsharp mask (`src/lib/enhance.ts`), with an optional on-device ONNX super-resolution pass when `NEXT_PUBLIC_SR_MODEL_URL` is set.
+- **Finish** — an edge-aware denoise plus mild unsharp mask (`src/lib/enhance.ts`), plus zero-config on-device 2× super-resolution: ESRGAN-slim (MIT, 900 KB of weights) is pulled from jsDelivr and run with TensorFlow.js in overlapping tiles, so nothing is uploaded and no API key exists. It only fires when the sphere is ≤2048 wide — a 4096 capture is already sharper than the model could make it.
 
 **Verified offline:**
 
 - Clean replay of 18 synthetic frames reconstructs the source panorama at **0.94/255** mean error, 98.5 % coverage — the projection math is exact.
 - With ±2.5° gyro noise and ±15 % per-channel exposure swings injected, drift and exposure correction cut the error from **12.79 → 7.06/255 (45 % better)** in 809 ms for 18 frames; visually it is the difference between doubled window frames with colour blotches and a clean room.
-- The clean-up pass recovers **32 %** of the error on a blurred, noisy panorama (0.8 s at 2048×1024). Denoise/sharpen/levels settings were chosen by sweeping 32 combinations against ground truth — auto-levels measurably hurt and is off by default.
+- The clean-up pass recovers **32 %** of the error on a blurred, noisy panorama; after switching the bilateral weight to a lookup table and the unsharp blur to a separable pass it runs **2.6× faster** — 0.5 s at 2048×1024, 1.7 s at 4096×2048. Denoise/sharpen/levels settings were chosen by sweeping 32 combinations against ground truth — auto-levels measurably hurt and is off by default.
 
 Real-world quality still depends on gyroscope accuracy and on the user rotating around the camera rather than around their body; neither can be measured without a device.
+
+Stitching 18 frames costs ~0.8 s at 2048 and ~2.5 s at 4096 (≈40 MB peak). The viewer allows 28–120° field of view, so a 4096-wide panorama supports roughly 4× zoom before softening.
 
 Requires a secure context (https or localhost) and a device with motion sensors.
 
@@ -169,13 +171,15 @@ Enforcement lives in Postgres, not the UI:
 
 - `enforce_publish_quota` — a BEFORE INSERT/UPDATE trigger on `properties` that rejects a transition to `published` when the trial is spent (`TOURHOME_TRIAL_USED`) or the plan's concurrent-tour limit is reached (`TOURHOME_PLAN_LIMIT`). `readableDbError` turns both into Mongolian copy. Unpublishing frees a slot.
 - `protect_billing_columns` — a BEFORE UPDATE trigger on `users` that reverts `plan`, `plan_expires_at`, `trial_used` and `trial_property_id` for anyone but `service_role`, so an agent cannot self-grant a subscription through the RLS-permitted profile update.
-- `activate_plan(email, plan)` — service-role helper for confirming a bank transfer; extends an existing subscription rather than overwriting it.
+- `activate_plan(email, plan)` — service-role helper for the rare manual case (contract customers); extends an existing subscription rather than overwriting it. All normal payments go through wire.mn.
 
 The trial listing itself can be unpublished and republished freely (`trial_property_id`).
 
 Existing databases: apply `supabase/migrations/002_billing.sql`.
 
-## 5.7 Payments (wire.mn)
+## 5.7 Payments — wire.mn only
+
+There is no bank-transfer path in the product: the billing page offers the three plans and sends the agent to the hosted checkout.
 
 `src/lib/wire.ts` is a dependency-free client for the [wire.mn](https://docs.wire.mn) Merchant API: `POST /v1/payment_intents` → `POST /v1/checkout/sessions` → redirect to `pay.wire.mn`, then a signed webhook.
 

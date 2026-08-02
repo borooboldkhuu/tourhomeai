@@ -6,6 +6,7 @@ import { SITE } from "@/lib/constants";
 import { DashboardNav } from "@/components/dashboard/dashboard-nav";
 import { UserMenu } from "@/components/dashboard/user-menu";
 import { InstallPWA, InstallPWACard } from "@/components/shared/install-pwa";
+import { Logo } from "@/components/shared/logo";
 import { ThemeToggle } from "@/components/shared/theme";
 import { Button } from "@/components/ui/button";
 import { Plus } from "lucide-react";
@@ -19,8 +20,8 @@ export default async function DashboardLayout({ children }: { children: React.Re
       <header className="sticky top-0 z-40 glass hairline">
         <div className="mx-auto flex h-16 max-w-7xl items-center justify-between gap-3 px-4 sm:px-6">
           <div className="flex items-center gap-8">
-            <Link href="/dashboard" className="text-[15px] font-semibold tracking-tight">
-              {SITE.name}
+            <Link href="/dashboard" aria-label={SITE.name}>
+              <Logo className="shrink-0" />
             </Link>
             <DashboardNav className="hidden md:flex" />
           </div>

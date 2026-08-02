@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { Clock } from "lucide-react";
+import { Logo } from "@/components/shared/logo";
 import { Button } from "@/components/ui/button";
 import { SITE } from "@/lib/constants";
 
@@ -7,6 +8,7 @@ import { SITE } from "@/lib/constants";
 export function PausedNotice({ title }: { title?: string }) {
   return (
     <main className="flex min-h-screen flex-col items-center justify-center gap-5 px-6 text-center">
+      <Logo size="lg" className="mb-2" />
       <div className="rounded-full bg-muted p-4">
         <Clock className="h-6 w-6 text-muted-foreground" />
       </div>
