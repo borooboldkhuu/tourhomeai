@@ -2,7 +2,7 @@
   "name": "tourhome-ai",
   "version": "1.0.0",
   "private": true,
-  "description": "TourHome AI — real estate virtual tour SaaS platform",
+  "description": "TourHome AI \u2014 real estate virtual tour SaaS platform",
   "scripts": {
     "dev": "next dev",
     "build": "next build",
@@ -24,7 +24,7 @@
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "lucide-react": "^0.475.0",
-    "next": "15.2.4",
+    "next": "15.5.22",
     "qrcode": "^1.5.4",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
@@ -42,9 +42,12 @@
     "@types/three": "^0.174.0",
     "autoprefixer": "^10.4.20",
     "eslint": "^9.21.0",
-    "eslint-config-next": "15.2.4",
-    "postcss": "^8.5.3",
+    "eslint-config-next": "15.5.22",
+    "postcss": "^8.5.25",
     "tailwindcss": "^3.4.17",
     "typescript": "^5.7.3"
+  },
+  "overrides": {
+    "sharp": "^0.35.3"
   }
 }

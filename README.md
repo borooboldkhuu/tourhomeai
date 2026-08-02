@@ -2,7 +2,7 @@
 
 Real estate virtual tour SaaS — agents upload apartment photos, 360° panoramas and video from their phone, and get a shareable, luxury-styled public tour page with a QR code.
 
-Stack: **Next.js 15 (App Router) · TypeScript · Tailwind CSS · shadcn/ui · Supabase (Auth + Postgres + Storage) · Pannellum.js · Three.js**
+Stack: **Next.js 15.5.22 (App Router) · TypeScript · Tailwind CSS · shadcn/ui · Supabase (Auth + Postgres + Storage) · Pannellum.js · Three.js**
 UI language: **Mongolian**.
 
 ---
@@ -222,6 +222,14 @@ When it closes, nothing is deleted or unpublished — `has_access()` is wired in
 Reads are additionally allowed by `is_admin()` RLS policies; all writes go through the service-role client on the server, so a stolen browser token cannot mutate other tenants' rows.
 
 **Security fix in 007:** `users` RLS permits an agent to update their own profile, and `role` was in scope — any account could have promoted itself to admin. `role` is now frozen by the same trigger that protects the billing columns.
+
+## 5.11 Dependency security
+
+Pinned to **Next.js 15.5.22**. The earlier 15.2.4 pin was affected by the May and July 2026 advisories (middleware authorisation bypass, SSRF, DoS, cache poisoning). The bypass matters here because `middleware.ts` gates `/dashboard` and `/admin` — though every page also calls `requireUser()` / `requireAdmin()` server-side, so the guard was never the only line of defence.
+
+`sharp` is forced to ^0.35.3 through `overrides` to clear the libvips CVEs. The remaining `postcss` advisory comes from the copy Next vendors internally; it runs at build time over this project's own CSS and is not reachable from user input.
+
+**Never run `npm audit fix --force` here** — npm's proposed "fix" downgrades Next.js to 9.3.3.
 
 ## 6. Verification performed
 
