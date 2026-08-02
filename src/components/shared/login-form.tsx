@@ -1,6 +1,7 @@
 "use client";
 
 import { useActionState } from "react";
+import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { AlertCircle } from "lucide-react";
 import { signIn, type ActionState } from "@/app/actions/auth";
@@ -23,7 +24,12 @@ export function LoginForm() {
       </div>
 
       <div className="space-y-2">
-        <Label htmlFor="password">Нууц үг</Label>
+        <div className="flex items-center justify-between">
+          <Label htmlFor="password">Нууц үг</Label>
+          <Link href="/forgot-password" className="text-xs text-muted-foreground underline-offset-4 hover:text-foreground hover:underline">
+            Мартсан уу?
+          </Link>
+        </div>
         <Input id="password" name="password" type="password" autoComplete="current-password" placeholder="••••••••" required />
       </div>
 

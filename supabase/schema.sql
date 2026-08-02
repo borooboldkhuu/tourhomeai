@@ -917,3 +917,209 @@ returns integer language sql stable security definer set search_path = public as
 $$;
 
 grant execute on function public.published_count(uuid) to authenticated;
+
+
+-- =============================================================================
+-- TourHome AI — 006: rate limiting for the public endpoints
+-- Lead forms and the analytics beacon are open to the internet, so they need a
+-- cheap, dependency-free throttle. Counters live in Postgres and expire.
+-- (included here so a fresh install is complete)
+-- =============================================================================
+
+create table if not exists public.rate_limits (
+  key          text primary key,
+  count        integer not null default 0,
+  window_start timestamptz not null default now()
+);
+
+alter table public.rate_limits enable row level security;
+-- no policies: only the service_role key may touch this table
+
+-- -----------------------------------------------------------------------------
+-- Returns true when the caller is still under the limit, false when throttled.
+--   select public.check_rate_limit('lead:1.2.3.4', 5, 3600);
+-- -----------------------------------------------------------------------------
+create or replace function public.check_rate_limit(
+  p_key text,
+  p_limit integer,
+  p_window_seconds integer
+)
+returns boolean language plpgsql security definer set search_path = public as $$
+declare
+  v_count integer;
+  v_start timestamptz;
+begin
+  select count, window_start into v_count, v_start
+  from public.rate_limits where key = p_key for update;
+
+  if v_start is null then
+    insert into public.rate_limits (key, count, window_start) values (p_key, 1, now())
+    on conflict (key) do update set count = public.rate_limits.count + 1;
+    return true;
+  end if;
+
+  if v_start < now() - make_interval(secs => p_window_seconds) then
+    update public.rate_limits set count = 1, window_start = now() where key = p_key;
+    return true;
+  end if;
+
+  if v_count >= p_limit then
+    return false;
+  end if;
+
+  update public.rate_limits set count = count + 1 where key = p_key;
+  return true;
+end $$;
+
+revoke execute on function public.check_rate_limit(text, integer, integer) from anon, authenticated;
+
+-- Housekeeping: drop counters nobody has touched for a day.
+create or replace function public.purge_rate_limits()
+returns integer language plpgsql security definer set search_path = public as $$
+declare v_count integer;
+begin
+  delete from public.rate_limits where window_start < now() - interval '1 day';
+  get diagnostics v_count = row_count;
+  return v_count;
+end $$;
+
+revoke execute on function public.purge_rate_limits() from anon, authenticated;
+
+
+-- =============================================================================
+-- TourHome AI — 007: admin role
+--
+-- SECURITY FIX: `users` RLS lets an agent update their own profile row, which
+-- until now included `role`. Anyone could have promoted themselves to admin.
+-- The column is frozen here alongside the billing columns.
+-- (included here so a fresh install is complete)
+-- =============================================================================
+
+create or replace function public.protect_billing_columns()
+returns trigger language plpgsql as $$
+begin
+  -- Trusted billing code sets `tourhome.billing_ok` for the duration of its
+  -- transaction; everything else (including the agent's own profile update)
+  -- has these columns frozen.
+  if coalesce(current_setting('tourhome.billing_ok', true), '') <> '1'
+     and auth.role() is distinct from 'service_role' then
+    new.plan              := old.plan;
+    new.plan_expires_at   := old.plan_expires_at;
+    new.trial_used        := old.trial_used;
+    new.plan_note         := old.plan_note;
+    new.trial_property_id := old.trial_property_id;
+    new.trial_started_at  := old.trial_started_at;
+    new.role              := old.role;   -- privilege escalation guard
+  end if;
+  return new;
+end $$;
+
+drop trigger if exists users_protect_billing on public.users;
+create trigger users_protect_billing before update on public.users
+  for each row execute function public.protect_billing_columns();
+
+-- -----------------------------------------------------------------------------
+-- Is the current session an administrator?
+-- -----------------------------------------------------------------------------
+create or replace function public.is_admin()
+returns boolean language sql stable security definer set search_path = public as $$
+  select coalesce((select role = 'admin' from public.users where id = auth.uid()), false);
+$$;
+
+grant execute on function public.is_admin() to authenticated;
+
+-- -----------------------------------------------------------------------------
+-- Admins may read everything. Writes still go through the service-role key on
+-- the server, so a stolen browser token cannot mutate other people's data.
+-- -----------------------------------------------------------------------------
+drop policy if exists "properties admin read" on public.properties;
+create policy "properties admin read" on public.properties
+  for select using (public.is_admin());
+
+drop policy if exists "leads admin read" on public.leads;
+create policy "leads admin read" on public.leads
+  for select using (public.is_admin());
+
+drop policy if exists "payments admin read" on public.payments;
+create policy "payments admin read" on public.payments
+  for select using (public.is_admin());
+
+drop policy if exists "analytics admin read" on public.analytics;
+create policy "analytics admin read" on public.analytics
+  for select using (public.is_admin());
+
+-- -----------------------------------------------------------------------------
+-- Cancel a subscription (mirror of activate_plan).
+-- -----------------------------------------------------------------------------
+create or replace function public.revoke_plan(p_email text)
+returns void language plpgsql security definer set search_path = public as $$
+begin
+  perform set_config('tourhome.billing_ok', '1', true);
+  update public.users
+     set plan = 'trial', plan_expires_at = null, plan_note = 'revoked ' || now()::date
+   where lower(email) = lower(p_email);
+end $$;
+
+revoke execute on function public.revoke_plan(text) from anon, authenticated;
+
+-- =============================================================================
+-- FIRST ADMIN — run once, replacing the address with your own:
+--
+--   update public.users set role = 'admin' where email = 'you@example.mn';
+--
+-- The trigger above blocks self-promotion from the app, but the SQL Editor
+-- runs as the owner, so this statement works.
+-- =============================================================================
+
+
+-- =============================================================================
+-- TourHome AI — 008: editable site settings
+-- Lets an administrator swap the 360° sample shown on the landing page without
+-- touching the code. (included here so a fresh install is complete)
+-- =============================================================================
+
+create table if not exists public.site_settings (
+  key        text primary key,
+  value      jsonb not null default '{}'::jsonb,
+  updated_at timestamptz not null default now(),
+  updated_by uuid references public.users(id) on delete set null
+);
+
+alter table public.site_settings enable row level security;
+
+-- Anyone may read: the landing page is public.
+drop policy if exists "settings public read" on public.site_settings;
+create policy "settings public read" on public.site_settings
+  for select using (true);
+
+-- Writes happen through the service-role key on the server only — no policy.
+
+drop trigger if exists site_settings_updated_at on public.site_settings;
+create trigger site_settings_updated_at before update on public.site_settings
+  for each row execute function public.set_updated_at();
+
+-- -----------------------------------------------------------------------------
+-- Bucket for marketing assets. Public to read, administrators to write.
+-- -----------------------------------------------------------------------------
+insert into storage.buckets (id, name, public, file_size_limit)
+values ('site-assets', 'site-assets', true, 83886080)   -- 80 MB
+on conflict (id) do nothing;
+
+drop policy if exists "site assets public read" on storage.objects;
+create policy "site assets public read" on storage.objects
+  for select using (bucket_id = 'site-assets');
+
+drop policy if exists "site assets admin write" on storage.objects;
+create policy "site assets admin write" on storage.objects
+  for insert to authenticated
+  with check (bucket_id = 'site-assets' and public.is_admin());
+
+drop policy if exists "site assets admin update" on storage.objects;
+create policy "site assets admin update" on storage.objects
+  for update to authenticated
+  using (bucket_id = 'site-assets' and public.is_admin());
+
+drop policy if exists "site assets admin delete" on storage.objects;
+create policy "site assets admin delete" on storage.objects
+  for delete to authenticated
+  using (bucket_id = 'site-assets' and public.is_admin());

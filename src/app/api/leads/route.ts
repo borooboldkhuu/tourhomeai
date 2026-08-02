@@ -1,9 +1,15 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { leadSchema } from "@/lib/validations";
+import { allowRequest, clientIp } from "@/lib/rate-limit";
 
 /** POST /api/leads — REST alternative to the submitLead server action. */
 export async function POST(request: NextRequest) {
+  const ip = clientIp(request.headers);
+  if (!(await allowRequest(`lead:${ip}`, 5, 3600))) {
+    return NextResponse.json({ error: "Too many requests" }, { status: 429 });
+  }
+
   const json = await request.json().catch(() => null);
   const parsed = leadSchema.safeParse(json);
   if (!parsed.success) {

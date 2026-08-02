@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { ArrowRight, Camera, QrCode, Rotate3d, Share2, ShieldCheck, Smartphone } from "lucide-react";
 import { DemoTour } from "@/components/marketing/demo-tour";
+import { getDemoRooms, toTours } from "@/lib/site-settings";
 import { Pricing } from "@/components/marketing/pricing";
 import { ThemeToggle } from "@/components/shared/theme";
 import { Logo } from "@/components/shared/logo";
@@ -22,7 +23,11 @@ const STEPS = [
   { n: "03", title: "Нийтлээд хуваалцах", body: "Холбоос болон QR код бэлэн. Харагдалтын тоог хянана." },
 ];
 
-export default function HomePage() {
+// Re-reads the admin-managed sample every 5 minutes.
+export const revalidate = 300;
+
+export default async function HomePage() {
+  const demoTours = toTours(await getDemoRooms());
   return (
     <div className="min-h-screen bg-background">
       {/* Nav */}
@@ -77,7 +82,7 @@ export default function HomePage() {
 
         {/* Live 360° sample */}
         <div className="mt-12 w-full max-w-5xl animate-fade-up">
-          <DemoTour />
+          <DemoTour tours={demoTours} />
           <p className="mt-4 text-sm text-muted-foreground">
             Энэ бол бодит бүтээгдэхүүн — үйлчлүүлэгч тань яг ингэж харна.
           </p>
@@ -126,7 +131,9 @@ export default function HomePage() {
             <Logo showText={false} className="[&_svg]:h-5 [&_svg]:w-5" />
             © {new Date().getFullYear()} {SITE.name}
           </p>
-          <div className="flex gap-6">
+          <div className="flex flex-wrap gap-x-6 gap-y-2">
+            <Link href="/terms" className="transition hover:text-foreground">Үйлчилгээний нөхцөл</Link>
+            <Link href="/privacy" className="transition hover:text-foreground">Нууцлалын бодлого</Link>
             <Link href="/login" className="transition hover:text-foreground">Нэвтрэх</Link>
             <Link href="/register" className="transition hover:text-foreground">Бүртгүүлэх</Link>
           </div>

@@ -1,6 +1,6 @@
 "use client";
 
-import { LogOut, Settings as SettingsIcon } from "lucide-react";
+import { LogOut, Settings as SettingsIcon, ShieldCheck } from "lucide-react";
 import Link from "next/link";
 import { signOut } from "@/app/actions/auth";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
@@ -32,6 +32,13 @@ export function UserMenu({ profile }: { profile: UserProfile }) {
             <SettingsIcon /> Тохиргоо
           </Link>
         </DropdownMenuItem>
+        {profile.role === "admin" && (
+          <DropdownMenuItem asChild>
+            <Link href="/admin">
+              <ShieldCheck /> Админ хэсэг
+            </Link>
+          </DropdownMenuItem>
+        )}
         <DropdownMenuSeparator />
         <DropdownMenuItem asChild>
           <form action={signOut} className="w-full">

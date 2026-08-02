@@ -1,6 +1,7 @@
 "use client";
 
 import { useActionState } from "react";
+import Link from "next/link";
 import { AlertCircle, CheckCircle2 } from "lucide-react";
 import { signUp, type ActionState } from "@/app/actions/auth";
 import { Input } from "@/components/ui/input";
@@ -50,8 +51,12 @@ export function RegisterForm() {
       )}
 
       <SubmitButton className="w-full" size="lg">Бүртгүүлэх</SubmitButton>
-      <p className="text-center text-xs text-muted-foreground">
-        Бүртгүүлснээр үйлчилгээний нөхцөлийг зөвшөөрч байна.
+      <p className="text-center text-xs leading-relaxed text-muted-foreground">
+        Бүртгүүлснээр{" "}
+        <Link href="/terms" className="underline underline-offset-2 hover:text-foreground">үйлчилгээний нөхцөл</Link>
+        {" "}болон{" "}
+        <Link href="/privacy" className="underline underline-offset-2 hover:text-foreground">нууцлалын бодлого</Link>
+        -г зөвшөөрч байна.
       </p>
     </form>
   );

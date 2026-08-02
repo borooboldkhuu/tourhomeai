@@ -4,6 +4,7 @@ import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
 import { loginSchema, registerSchema, profileSchema } from "@/lib/validations";
+import { absoluteUrl } from "@/lib/utils";
 
 export type ActionState = { error?: string; success?: string } | null;
 
@@ -86,4 +87,40 @@ export async function updateProfile(_prev: ActionState, formData: FormData): Pro
 
   revalidatePath("/dashboard/settings");
   return { success: "Хадгаллаа" };
+}
+
+/* ------------------------------------------------------- password recovery -- */
+
+/** Sends the recovery link. Always reports success so nobody can probe emails. */
+export async function requestPasswordReset(_prev: ActionState, formData: FormData): Promise<ActionState> {
+  const email = String(formData.get("email") ?? "").trim();
+  if (!email.includes("@")) return { error: "Зөв и-мэйл хаяг оруулна уу" };
+
+  const supabase = await createClient();
+  await supabase.auth.resetPasswordForEmail(email, {
+    redirectTo: absoluteUrl("/auth/callback?next=/reset-password"),
+  });
+
+  return {
+    success: "Хэрэв энэ хаягаар бүртгэлтэй бол сэргээх холбоос илгээгдлээ. И-мэйлээ шалгана уу.",
+  };
+}
+
+/** Runs on /reset-password, where the recovery link has already signed the user in. */
+export async function updatePassword(_prev: ActionState, formData: FormData): Promise<ActionState> {
+  const password = String(formData.get("password") ?? "");
+  const confirm = String(formData.get("confirm") ?? "");
+
+  if (password.length < 6) return { error: "Нууц үг доод тал нь 6 тэмдэгт байна" };
+  if (password !== confirm) return { error: "Нууц үг хоорондоо таарахгүй байна" };
+
+  const supabase = await createClient();
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) return { error: "Сэргээх холбоосны хугацаа дууссан байна. Дахин хүсэлт илгээнэ үү." };
+
+  const { error } = await supabase.auth.updateUser({ password });
+  if (error) return { error: error.message };
+
+  revalidatePath("/", "layout");
+  return { success: "Нууц үг шинэчлэгдлээ." };
 }

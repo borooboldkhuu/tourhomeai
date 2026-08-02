@@ -247,6 +247,12 @@ export type Database = {
           },
         ];
       };
+      site_settings: {
+        Row: { key: string; value: Record<string, unknown>; updated_at: string; updated_by: string | null };
+        Insert: { key: string; value?: Record<string, unknown>; updated_by?: string | null };
+        Update: { value?: Record<string, unknown>; updated_by?: string | null };
+        Relationships: [];
+      };
       webhook_events: {
         Row: WebhookEvent;
         Insert: Partial<WebhookEvent> & { id: string; type: string };
@@ -307,6 +313,22 @@ export type Database = {
       deactivate_expired: {
         Args: { p_grace_days?: number };
         Returns: number;
+      };
+      revoke_plan: {
+        Args: { p_email: string };
+        Returns: undefined;
+      };
+      is_admin: {
+        Args: Record<string, never>;
+        Returns: boolean;
+      };
+      activate_plan: {
+        Args: { p_email: string; p_plan: PlanId; p_note?: string };
+        Returns: string;
+      };
+      check_rate_limit: {
+        Args: { p_key: string; p_limit: number; p_window_seconds: number };
+        Returns: boolean;
       };
       has_access: {
         Args: { p_agent: string };

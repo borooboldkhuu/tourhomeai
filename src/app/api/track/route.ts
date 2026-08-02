@@ -1,5 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { allowRequest, clientIp } from "@/lib/rate-limit";
 
 /**
  * POST /api/track
@@ -8,6 +9,11 @@ import { createAdminClient } from "@/lib/supabase/admin";
  */
 export async function POST(request: NextRequest) {
   try {
+    const ip = clientIp(request.headers);
+    if (!(await allowRequest(`track:${ip}`, 120, 600))) {
+      return NextResponse.json({ ok: false, throttled: true }, { status: 429 });
+    }
+
     const body = await request.json();
     const { propertyId, eventType = "view", sceneKey, sessionId } = body ?? {};
     if (!propertyId) return NextResponse.json({ ok: false }, { status: 400 });

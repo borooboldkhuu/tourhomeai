@@ -201,16 +201,38 @@ When it closes, nothing is deleted or unpublished — `has_access()` is wired in
 
 **Verified offline:** 14 assertions across the trial/paid/expired matrix, including the boundary at 6.9 vs 7.1 days and a lapsed plan overlapping an open trial window.
 
+## 5.9 Launch hardening
+
+- **Password recovery** — `/forgot-password` → Supabase recovery link → `/auth/callback?next=/reset-password` → `/reset-password` sets the new password. The request form always reports success so the endpoint cannot be used to enumerate accounts.
+- **Spam control** — a honeypot field on the lead form plus a Postgres rate limiter (`check_rate_limit`): 5 leads per IP per hour, 120 analytics beacons per 10 minutes. Counters self-expire; the limiter fails open so a database blip never costs a lead.
+- **Lead notifications** — `src/lib/mail.ts` posts to Resend when `RESEND_API_KEY` and `MAIL_FROM` are set, with `reply_to` pointing at the visitor. Silent no-op otherwise.
+- **Legal** — `/terms` and `/privacy` in Mongolian, linked from the footer and the signup consent line. Templates, explicitly marked as needing legal review.
+- **SEO** — `robots.ts` blocks the dashboard and API, `sitemap.ts` lists published tours.
+
+## 5.10 Admin panel
+
+`/admin` is guarded by `requireAdmin()` on the server and redirects non-admins to their dashboard instead of returning 403, so the section leaves no trace for ordinary users.
+
+- **Overview** — accounts, listings, views, leads, revenue this month and lifetime, active subscriptions per plan, latest payments.
+- **Users** — search, grant or revoke a plan (wraps `activate_plan` / `revoke_plan`), change role.
+- **Payments** — the last 200 wire.mn transactions with intent ids and live/test flag.
+- **Properties** — every listing with a moderation toggle.
+- **Landing** — swap the 360° sample shown to visitors: upload panoramas to the `site-assets` bucket (public read, `is_admin()` write), rename and reorder rooms, or restore the bundled default. The landing page reads `site_settings.landing_demo` with ISR every 5 minutes and revalidates immediately on save; if the table is missing it silently falls back to the shipped sample.
+
+Reads are additionally allowed by `is_admin()` RLS policies; all writes go through the service-role client on the server, so a stolen browser token cannot mutate other tenants' rows.
+
+**Security fix in 007:** `users` RLS permits an agent to update their own profile, and `role` was in scope — any account could have promoted itself to admin. `role` is now frozen by the same trigger that protects the billing columns.
+
 ## 6. Verification performed
 
 - `tsc --noEmit` → **0 errors**
-- `next build` → **21 routes compiled**, ESLint and type validation passed
+- `next build` → **32 routes compiled**, ESLint and type validation passed
 - Panorama stitcher round-trip test → **0.94/255 mean error**, 98.5 % coverage over 18 frames
 - wire.mn webhook signature + parsing suite → **17/17 assertions passed**
 - Stitcher under gyro + exposure noise → **45 % error reduction**; clean-up pass → **32 % error reduction**
 - Access-window matrix → **14/14 assertions passed**
 - Plan limits and trial window cross-checked between SQL and TypeScript → **5/5 agree**
-- `supabase/schema.sql` parsed with libpg_query (pglast) → **145 statements, valid PostgreSQL**
+- `supabase/schema.sql` parsed with libpg_query (pglast) → **181 statements, valid PostgreSQL**
 
 Note: the build machine used for verification had no access to Google Fonts, so `next/font` was stubbed there only. The shipped `layout.tsx` uses `Inter` with `latin` + `cyrillic` subsets and will fetch normally on your machine.
 

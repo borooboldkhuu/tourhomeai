@@ -102,6 +102,11 @@ function LeadDialog({ propertyId }: { propertyId: string }) {
         ) : (
           <form action={formAction} className="space-y-4">
             <input type="hidden" name="propertyId" value={propertyId} />
+            {/* honeypot — hidden from people, irresistible to bots */}
+            <input
+              type="text" name="website" tabIndex={-1} autoComplete="off"
+              aria-hidden="true" className="absolute left-[-9999px] h-0 w-0 opacity-0"
+            />
             <div className="space-y-2">
               <Label htmlFor="lead-name">Нэр *</Label>
               <Input id="lead-name" name="name" required placeholder="Таны нэр" />
