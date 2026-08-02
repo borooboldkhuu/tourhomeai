@@ -145,7 +145,19 @@ The gyroscope supplies the camera pose for every frame (`DeviceOrientationEvent`
 
 18 aim targets (a full ring, two tilted rings, zenith, nadir) guide the user; frames are captured automatically when the phone is aimed and steady. Camera FOV is user-adjustable (45–90°, default 65°).
 
-**Verified offline:** replaying 18 synthetic frames rendered from a known panorama reconstructs it with a mean absolute error of **0.94/255** at **98.5 % sphere coverage** — i.e. the projection math is correct. Real-world quality depends on gyroscope accuracy and cannot be measured without a device.
+Quality work happens in three places:
+
+- **Capture** — exposure, white balance and focus are locked once the stream settles; frames are only taken after two consecutive steady readings and must pass a variance-of-Laplacian sharpness gate, so motion blur never reaches the stitcher.
+- **Stitch** — every frame after the first is re-aligned against what is already on the sphere by maximising normalised cross-correlation over a three-stage yaw/pitch search (±3° → 0.07°), which cancels gyroscope drift; a per-channel gain then matches its exposure to the overlap. Sampling is bilinear and the poles are capped from the nearest captured colour.
+- **Finish** — an edge-aware denoise plus mild unsharp mask (`src/lib/enhance.ts`), with an optional on-device ONNX super-resolution pass when `NEXT_PUBLIC_SR_MODEL_URL` is set.
+
+**Verified offline:**
+
+- Clean replay of 18 synthetic frames reconstructs the source panorama at **0.94/255** mean error, 98.5 % coverage — the projection math is exact.
+- With ±2.5° gyro noise and ±15 % per-channel exposure swings injected, drift and exposure correction cut the error from **12.79 → 7.06/255 (45 % better)** in 809 ms for 18 frames; visually it is the difference between doubled window frames with colour blotches and a clean room.
+- The clean-up pass recovers **32 %** of the error on a blurred, noisy panorama (0.8 s at 2048×1024). Denoise/sharpen/levels settings were chosen by sweeping 32 combinations against ground truth — auto-levels measurably hurt and is off by default.
+
+Real-world quality still depends on gyroscope accuracy and on the user rotating around the camera rather than around their body; neither can be measured without a device.
 
 Requires a secure context (https or localhost) and a device with motion sensors.
 
@@ -191,6 +203,7 @@ When it closes, nothing is deleted or unpublished — `has_access()` is wired in
 - `next build` → **21 routes compiled**, ESLint and type validation passed
 - Panorama stitcher round-trip test → **0.94/255 mean error**, 98.5 % coverage over 18 frames
 - wire.mn webhook signature + parsing suite → **17/17 assertions passed**
+- Stitcher under gyro + exposure noise → **45 % error reduction**; clean-up pass → **32 % error reduction**
 - Access-window matrix → **14/14 assertions passed**
 - Plan limits and trial window cross-checked between SQL and TypeScript → **5/5 agree**
 - `supabase/schema.sql` parsed with libpg_query (pglast) → **145 statements, valid PostgreSQL**

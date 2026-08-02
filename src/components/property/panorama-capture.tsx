@@ -1,11 +1,12 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Camera, Check, Loader2, RotateCcw, Smartphone, X } from "lucide-react";
+import { Camera, Check, Loader2, RotateCcw, Smartphone, Sparkles, X } from "lucide-react";
 import {
   EquirectStitcher, buildTargets, orientationToMatrix, transposeMul,
   forwardOf, angleBetween, type CoverageTarget, type Mat3,
 } from "@/lib/pano-stitch";
+import { aiUpscale, aiUpscaleAvailable, enhanceCanvas } from "@/lib/enhance";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
@@ -15,7 +16,9 @@ interface DeviceOrientationEventStatic {
 }
 
 const AIM_TOLERANCE = 12 * (Math.PI / 180); // how close you must point at a target
-const STEADY_LIMIT = 1.6 * (Math.PI / 180); // max wobble per frame while capturing
+const STEADY_LIMIT = 1.1 * (Math.PI / 180); // max wobble per frame while capturing
+const SHARPNESS_MIN = 55;                   // variance of Laplacian on the grabbed frame
+const STEADY_FRAMES = 2;                    // consecutive calm frames before we shoot
 const DEFAULT_HFOV = 65;
 
 type Phase = "intro" | "capturing" | "processing" | "error";
@@ -43,6 +46,9 @@ export function PanoramaCapture({
   const [done, setDone] = useState(0);
   const [total, setTotal] = useState(18);
   const [hFov, setHFov] = useState(DEFAULT_HFOV);
+  const [hint, setHint] = useState("");
+  const [progress, setProgress] = useState("");
+  const steadyCountRef = useRef(0);
   const hFovRef = useRef(DEFAULT_HFOV);
   hFovRef.current = hFov;
 
@@ -84,6 +90,23 @@ export function PanoramaCapture({
       video.srcObject = stream;
       await video.play();
 
+      // Let the camera settle, then freeze exposure, white balance and focus.
+      // Without this every frame is metered differently and the seams glow.
+      const track = stream.getVideoTracks()[0];
+      setTimeout(() => {
+        void track
+          .applyConstraints({
+            advanced: [
+              { exposureMode: "manual" },
+              { whiteBalanceMode: "manual" },
+              { focusMode: "manual" },
+            ],
+          } as unknown as MediaTrackConstraints)
+          .catch(() => {
+            // not supported on this device — the stitcher compensates instead
+          });
+      }, 700);
+
       stitcherRef.current = new EquirectStitcher(2048);
       targetsRef.current = buildTargets();
       refMatRef.current = null;
@@ -105,11 +128,29 @@ export function PanoramaCapture({
   }
 
   /* ------------------------------------------------------------- capture -- */
-  function grabFrame(rel: Mat3) {
+  /** Variance of the Laplacian — a cheap, reliable blur detector. */
+  function sharpness(data: ImageData) {
+    const { width: w, height: h, data: d } = data;
+    const step = 2;
+    let sum = 0, sum2 = 0, n = 0;
+    for (let y = step; y < h - step; y += step) {
+      for (let x = step; x < w - step; x += step) {
+        const i = (y * w + x) * 4;
+        const c = d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114;
+        const l =
+          (d[i - step * 4] + d[i + step * 4] + d[i - step * w * 4] + d[i + step * w * 4]) * 0.299 - 4 * c;
+        sum += l; sum2 += l * l; n++;
+      }
+    }
+    if (!n) return 0;
+    return sum2 / n - (sum / n) ** 2;
+  }
+
+  function grabFrame(rel: Mat3): boolean {
     const video = videoRef.current;
     const canvas = grabRef.current;
     const stitcher = stitcherRef.current;
-    if (!video || !canvas || !stitcher || !video.videoWidth) return;
+    if (!video || !canvas || !stitcher || !video.videoWidth) return false;
 
     const scale = 640 / Math.max(video.videoWidth, video.videoHeight);
     const w = Math.round(video.videoWidth * scale);
@@ -118,8 +159,17 @@ export function PanoramaCapture({
     canvas.height = h;
     const ctx = canvas.getContext("2d", { willReadFrequently: true })!;
     ctx.drawImage(video, 0, 0, w, h);
-    stitcher.addFrame(ctx.getImageData(0, 0, w, h), rel, hFovRef.current);
+    const pixels = ctx.getImageData(0, 0, w, h);
+
+    if (sharpness(pixels) < SHARPNESS_MIN) {
+      setHint("Бүдэг байна — тогтоож барина уу");
+      return false;
+    }
+
+    stitcher.addFrame(pixels, rel, hFovRef.current);
+    setHint("");
     navigator.vibrate?.(25);
+    return true;
   }
 
   const loop = useCallback(() => {
@@ -147,10 +197,14 @@ export function PanoramaCapture({
       if (a < nearestAngle) { nearestAngle = a; nearest = t; }
     }
 
-    if (nearest && nearestAngle < AIM_TOLERANCE && wobble < STEADY_LIMIT) {
-      grabFrame(rel);
-      nearest.done = true;
-      setDone(targetsRef.current.filter((t) => t.done).length);
+    steadyCountRef.current = wobble < STEADY_LIMIT ? steadyCountRef.current + 1 : 0;
+
+    if (nearest && nearestAngle < AIM_TOLERANCE && steadyCountRef.current >= STEADY_FRAMES) {
+      if (grabFrame(rel)) {
+        nearest.done = true;
+        steadyCountRef.current = 0;
+        setDone(targetsRef.current.filter((t) => t.done).length);
+      }
     }
 
     drawOverlay(rel, nearest, nearestAngle);
@@ -226,8 +280,30 @@ export function PanoramaCapture({
     if (!stitcher || stitcher.frames === 0) return;
     setPhase("processing");
     cancelAnimationFrame(rafRef.current);
+
     try {
-      const file = await stitcher.toFile();
+      setProgress("Панорам угсарч байна…");
+      let canvas = stitcher.toCanvas();
+
+      setProgress("Цэвэрлэж, хурцлаж байна…");
+      await new Promise((r) => setTimeout(r, 30));   // let the label paint
+      enhanceCanvas(canvas);
+
+      if (aiUpscaleAvailable()) {
+        try {
+          setProgress("AI нягтруулж байна… (эхний удаа удаж магадгүй)");
+          const up = await aiUpscale(canvas, (d, t) => setProgress(`AI нягтруулж байна… ${d}/${t}`));
+          if (up) canvas = up;
+        } catch {
+          setProgress("AI алгасав — энгийн чанараар хадгалж байна");
+        }
+      }
+
+      setProgress("Хадгалж байна…");
+      const blob: Blob = await new Promise((resolve, reject) =>
+        canvas.toBlob((b) => (b ? resolve(b) : reject(new Error("toBlob"))), "image/jpeg", 0.9),
+      );
+      const file = new File([blob], `360-${Date.now()}.jpg`, { type: "image/jpeg" });
       stop();
       onCapture(file);
     } catch {
@@ -237,6 +313,8 @@ export function PanoramaCapture({
   }
 
   function reset() {
+    setHint("");
+    steadyCountRef.current = 0;
     stitcherRef.current = new EquirectStitcher(2048);
     targetsRef.current = buildTargets();
     refMatRef.current = null;
@@ -290,7 +368,13 @@ export function PanoramaCapture({
         {phase === "processing" && (
           <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-black/90">
             <Loader2 className="h-7 w-7 animate-spin" />
-            <p className="text-sm text-white/80">Панорам угсарч байна…</p>
+            <p className="text-sm text-white/80">{progress || "Панорам угсарч байна…"}</p>
+            {stitcherRef.current && stitcherRef.current.avgCorrectionDeg > 0.05 && (
+              <p className="flex items-center gap-1.5 text-xs text-white/50">
+                <Sparkles className="h-3 w-3" />
+                хазайлт {stitcherRef.current.avgCorrectionDeg.toFixed(1)}° залруулав
+              </p>
+            )}
           </div>
         )}
 
@@ -305,6 +389,11 @@ export function PanoramaCapture({
             <div className="absolute left-4 top-4 rounded-full bg-black/50 px-4 py-2 text-sm backdrop-blur">
               {done} / {total}
             </div>
+            {hint && (
+              <div className="absolute left-1/2 top-4 -translate-x-1/2 rounded-full bg-amber-500/90 px-4 py-2 text-xs font-medium text-black">
+                {hint}
+              </div>
+            )}
           </>
         )}
       </div>

@@ -82,6 +82,24 @@ function quatToMatrix(q: [number, number, number, number]): Mat3 {
   return m;
 }
 
+/** R' = Rx(dPitch) · Ry(dYaw) · R — nudges a camera pose in world space. */
+export function rotateBy(r: Mat3, dYawDeg: number, dPitchDeg: number): Mat3 {
+  const y = dYawDeg * DEG, p = dPitchDeg * DEG;
+  const cy = Math.cos(y), sy = Math.sin(y);
+  const cp = Math.cos(p), sp = Math.sin(p);
+  // M = Rx(p) · Ry(y)
+  const m = [
+    cy, 0, sy,
+    sp * sy, cp, -sp * cy,
+    -cp * sy, sp, cp * cy,
+  ];
+  const o = new Float64Array(9);
+  for (let i = 0; i < 3; i++)
+    for (let j = 0; j < 3; j++)
+      o[i * 3 + j] = m[i * 3] * r[j] + m[i * 3 + 1] * r[3 + j] + m[i * 3 + 2] * r[6 + j];
+  return o;
+}
+
 /** Rᵀ · A — used to express later frames relative to the first one. */
 export function transposeMul(r: Mat3, a: Mat3): Mat3 {
   const o = new Float64Array(9);
@@ -134,8 +152,14 @@ export class EquirectStitcher {
   private rgb: Uint8ClampedArray;
   private weight: Uint8Array;
   frames = 0;
+  /** Degrees of gyro drift removed from the last frame. */
+  lastCorrectionDeg = 0;
+  private corrections: number[] = [];
 
-  constructor(width = 2048) {
+  private opts: { refine: boolean; matchExposure: boolean };
+
+  constructor(width = 2048, opts: { refine?: boolean; matchExposure?: boolean } = {}) {
+    this.opts = { refine: opts.refine ?? true, matchExposure: opts.matchExposure ?? true };
     this.width = width;
     this.height = width / 2;
     const n = this.width * this.height;
@@ -147,6 +171,12 @@ export class EquirectStitcher {
     }
   }
 
+  /** Average drift correction applied so far, in degrees. */
+  get avgCorrectionDeg() {
+    if (!this.corrections.length) return 0;
+    return this.corrections.reduce((a, b) => a + b, 0) / this.corrections.length;
+  }
+
   get coverage() {
     let filled = 0;
     for (let i = 0; i < this.weight.length; i += 7) if (this.weight[i] > 0) filled++;
@@ -155,11 +185,149 @@ export class EquirectStitcher {
 
   /**
    * Paint one camera frame onto the sphere.
+   *
+   * Before painting we do two corrections that make the difference between a
+   * usable panorama and a broken one:
+   *   1. drift — the gyroscope slowly wanders, so the frame is re-aligned
+   *      against what is already on the sphere by maximising correlation over
+   *      a small yaw/pitch search;
+   *   2. exposure — phone cameras re-meter between shots, so each frame is
+   *      scaled per channel to match the brightness of the overlap.
+   *
    * @param frame  pixels straight from the video element
    * @param r      camera→world rotation for this frame
    * @param hFovDeg horizontal field of view of the phone camera
    */
   addFrame(frame: ImageData, r: Mat3, hFovDeg: number) {
+    const aligned =
+      this.frames === 0 || (!this.opts.refine && !this.opts.matchExposure)
+        ? { r, gain: [1, 1, 1] as const, shift: 0 }
+        : this.align(frame, r, hFovDeg);
+    this.lastCorrectionDeg = aligned.shift;
+    if (this.frames > 0) this.corrections.push(aligned.shift);
+    this.paint(frame, aligned.r, hFovDeg, aligned.gain);
+  }
+
+  /* ------------------------------------------------------------- alignment -- */
+
+  /** Grid of sample points inside the frame, avoiding the feathered border. */
+  private sampleGrid(fw: number, fh: number) {
+    const pts: [number, number][] = [];
+    const nx = 22, ny = 16;
+    for (let iy = 0; iy < ny; iy++) {
+      for (let ix = 0; ix < nx; ix++) {
+        pts.push([
+          (-0.38 + (0.76 * ix) / (nx - 1)) * fw,
+          (-0.38 + (0.76 * iy) / (ny - 1)) * fh,
+        ]);
+      }
+    }
+    return pts;
+  }
+
+  /**
+   * Searches a small yaw/pitch offset that best lines the frame up with the
+   * pixels already on the sphere, and measures the exposure difference.
+   */
+  private align(frame: ImageData, r: Mat3, hFovDeg: number) {
+    const fw = frame.width, fh = frame.height;
+    const f = (fw / 2) / Math.tan((hFovDeg * DEG) / 2);
+    const pts = this.sampleGrid(fw, fh);
+
+    const score = (rr: Mat3) => {
+      let n = 0, sa = 0, sb = 0, saa = 0, sbb = 0, sab = 0;
+      for (const [u, v] of pts) {
+        const len = Math.hypot(u, v, f);
+        const cx = u / len, cy = v / len, cz = -f / len;
+        const dx = rr[0] * cx + rr[1] * cy + rr[2] * cz;
+        const dy = rr[3] * cx + rr[4] * cy + rr[5] * cz;
+        const dz = rr[6] * cx + rr[7] * cy + rr[8] * cz;
+        const yaw = Math.atan2(dx, dz);
+        const pitch = Math.asin(Math.max(-1, Math.min(1, dy)));
+
+        const px = Math.round(((yaw / (2 * Math.PI)) + 0.5) * this.width) % this.width;
+        const py = Math.round((0.5 - pitch / Math.PI) * this.height);
+        if (py < 0 || py >= this.height) continue;
+        const idx = py * this.width + ((px + this.width) % this.width);
+        if (this.weight[idx] < 40) continue;             // nothing solid there yet
+
+        const sx = Math.round(fw / 2 + u), sy = Math.round(fh / 2 - v);
+        if (sx < 0 || sx >= fw || sy < 0 || sy >= fh) continue;
+        const si = (sy * fw + sx) * 4;
+        const oi = idx * 4;
+        const a = frame.data[si] * 0.299 + frame.data[si + 1] * 0.587 + frame.data[si + 2] * 0.114;
+        const b = this.rgb[oi] * 0.299 + this.rgb[oi + 1] * 0.587 + this.rgb[oi + 2] * 0.114;
+        n++; sa += a; sb += b; saa += a * a; sbb += b * b; sab += a * b;
+      }
+      if (n < 50) return { ncc: -2, n };
+      const va = saa - (sa * sa) / n, vb = sbb - (sb * sb) / n;
+      if (va <= 1e-6 || vb <= 1e-6) return { ncc: -2, n };
+      return { ncc: (sab - (sa * sb) / n) / Math.sqrt(va * vb), n };
+    };
+
+    let best = { r, ncc: score(r).ncc, dy: 0, dp: 0 };
+    if (best.ncc < -1) {
+      return { r, gain: [1, 1, 1] as const, shift: 0 };   // no usable overlap
+    }
+
+    // coarse pass, then a finer one around the winner
+    for (const [range, step] of (this.opts.refine ? [[3, 1], [0.75, 0.25], [0.2, 0.07]] : []) as [number, number][]) {
+      const cy = best.dy, cp = best.dp;
+      for (let dy = cy - range; dy <= cy + range + 1e-9; dy += step) {
+        for (let dp = cp - range; dp <= cp + range + 1e-9; dp += step) {
+          if (dy === best.dy && dp === best.dp) continue;
+          const cand = rotateBy(r, dy, dp);
+          const s = score(cand);
+          if (s.ncc > best.ncc) best = { r: cand, ncc: s.ncc, dy, dp };
+        }
+      }
+    }
+
+    return {
+      r: best.r,
+      gain: this.opts.matchExposure
+        ? this.exposureGain(frame, best.r, hFovDeg)
+        : ([1, 1, 1] as const),
+      shift: Math.hypot(best.dy, best.dp),
+    };
+  }
+
+  /** Per-channel scale that makes this frame match the overlap it lands on. */
+  private exposureGain(frame: ImageData, r: Mat3, hFovDeg: number): readonly [number, number, number] {
+    const fw = frame.width, fh = frame.height;
+    const f = (fw / 2) / Math.tan((hFovDeg * DEG) / 2);
+    const sumA = [0, 0, 0], sumB = [0, 0, 0];
+    let n = 0;
+
+    for (const [u, v] of this.sampleGrid(fw, fh)) {
+      const len = Math.hypot(u, v, f);
+      const cx = u / len, cy = v / len, cz = -f / len;
+      const dx = r[0] * cx + r[1] * cy + r[2] * cz;
+      const dy = r[3] * cx + r[4] * cy + r[5] * cz;
+      const dz = r[6] * cx + r[7] * cy + r[8] * cz;
+      const px = Math.round(((Math.atan2(dx, dz) / (2 * Math.PI)) + 0.5) * this.width) % this.width;
+      const py = Math.round((0.5 - Math.asin(Math.max(-1, Math.min(1, dy))) / Math.PI) * this.height);
+      if (py < 0 || py >= this.height) continue;
+      const idx = py * this.width + ((px + this.width) % this.width);
+      if (this.weight[idx] < 40) continue;
+
+      const sx = Math.round(fw / 2 + u), sy = Math.round(fh / 2 - v);
+      if (sx < 0 || sx >= fw || sy < 0 || sy >= fh) continue;
+      const si = (sy * fw + sx) * 4, oi = idx * 4;
+      for (let c = 0; c < 3; c++) { sumA[c] += frame.data[si + c]; sumB[c] += this.rgb[oi + c]; }
+      n++;
+    }
+
+    if (n < 50) return [1, 1, 1] as const;
+    const g = [0, 1, 2].map((c) =>
+      sumA[c] > 8 ? Math.min(1.35, Math.max(0.75, sumB[c] / sumA[c])) : 1,
+    );
+    return [g[0], g[1], g[2]] as const;
+  }
+
+  /* ---------------------------------------------------------------- paint -- */
+
+  private paint(frame: ImageData, r: Mat3, hFovDeg: number, gain: readonly [number, number, number]) {
     const { width: W, height: H } = this;
     const fw = frame.width, fh = frame.height;
     const src = frame.data;
@@ -219,9 +387,16 @@ export class EquirectStitcher {
         const v = (f * cy) / -cz;
         if (u < -halfW || u > halfW || v < -halfH || v > halfH) continue;
 
-        const sx = (halfW + u) | 0;
-        const sy = (halfH - v) | 0;
-        if (sx < 0 || sx >= fw || sy < 0 || sy >= fh) continue;
+        // bilinear sample — nearest neighbour visibly aliases at this scale
+        const fx = halfW + u - 0.5;
+        const fy = halfH - v - 0.5;
+        const x0i = Math.floor(fx), y0i = Math.floor(fy);
+        if (x0i < 0 || x0i + 1 >= fw || y0i < 0 || y0i + 1 >= fh) continue;
+        const tx = fx - x0i, ty = fy - y0i;
+        const i00 = (y0i * fw + x0i) * 4, i10 = i00 + 4;
+        const i01 = i00 + fw * 4, i11 = i01 + 4;
+        const w00 = (1 - tx) * (1 - ty), w10 = tx * (1 - ty);
+        const w01 = (1 - tx) * ty, w11 = tx * ty;
 
         // feathered weight — 0 at the frame border, 255 in the middle
         const wx = 1 - Math.abs(u) / halfW;
@@ -229,21 +404,77 @@ export class EquirectStitcher {
         const w = (Math.sqrt(Math.min(wx, wy)) * 255) | 0;
         if (w <= 0) continue;
 
-        const si = (sy * fw + sx) * 4;
         const oi = (rowOut + px) * 4;
         const prev = this.weight[rowOut + px];
         const a = w / (w + prev + 1);
 
-        this.rgb[oi] += (src[si] - this.rgb[oi]) * a;
-        this.rgb[oi + 1] += (src[si + 1] - this.rgb[oi + 1]) * a;
-        this.rgb[oi + 2] += (src[si + 2] - this.rgb[oi + 2]) * a;
+        for (let c = 0; c < 3; c++) {
+          const s =
+            (src[i00 + c] * w00 + src[i10 + c] * w10 + src[i01 + c] * w01 + src[i11 + c] * w11) *
+            gain[c];
+          this.rgb[oi + c] += (s - this.rgb[oi + c]) * a;
+        }
         if (w > prev) this.weight[rowOut + px] = w;
       }
     }
     this.frames++;
   }
 
+  /* --------------------------------------------------------------- finish -- */
+
+  /**
+   * Caps the uncovered zenith/nadir with a soft colour taken from the nearest
+   * captured pixels, so the poles read as ceiling and floor rather than as
+   * two grey holes.
+   */
+  private fillHoles() {
+    const { width: W, height: H } = this;
+
+    const cap = (fromTop: boolean) => {
+      const edge = new Int32Array(W).fill(-1);
+      let rSum = 0, gSum = 0, bSum = 0, n = 0;
+
+      for (let x = 0; x < W; x++) {
+        for (let k = 0; k < H; k++) {
+          const y = fromTop ? k : H - 1 - k;
+          if (this.weight[y * W + x] > 0) {
+            edge[x] = y;
+            const i = (y * W + x) * 4;
+            rSum += this.rgb[i]; gSum += this.rgb[i + 1]; bSum += this.rgb[i + 2];
+            n++;
+            break;
+          }
+        }
+      }
+      if (!n) return;
+      const avg = [rSum / n, gSum / n, bSum / n];
+
+      for (let x = 0; x < W; x++) {
+        const y0 = edge[x];
+        if (y0 < 0) continue;
+        const e = (y0 * W + x) * 4;
+        const edgeCol = [this.rgb[e], this.rgb[e + 1], this.rgb[e + 2]];
+        const span = fromTop ? y0 : H - 1 - y0;
+        if (span <= 0) continue;
+
+        for (let k = 0; k < span; k++) {
+          const y = fromTop ? y0 - 1 - k : y0 + 1 + k;
+          const t = Math.min(1, (k + 1) / span);          // fade to the pole average
+          const i = (y * W + x) * 4;
+          for (let c = 0; c < 3; c++) {
+            this.rgb[i + c] = edgeCol[c] + (avg[c] - edgeCol[c]) * t;
+          }
+          this.rgb[i + 3] = 255;
+        }
+      }
+    };
+
+    cap(true);
+    cap(false);
+  }
+
   toCanvas(): HTMLCanvasElement {
+    this.fillHoles();
     const canvas = document.createElement("canvas");
     canvas.width = this.width;
     canvas.height = this.height;
