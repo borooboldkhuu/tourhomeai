@@ -57,6 +57,8 @@ export function PanoramaViewer({ tours, className, onSceneChange }: Props) {
   const [rotating, setRotating] = useState(false);
   const [zoomPct, setZoomPct] = useState(0);
   const [fullscreen, setFullscreen] = useState(false);
+  /** CSS fallback used when the browser refuses to lock the orientation (iOS). */
+  const [rotated, setRotated] = useState(false);
 
   useEffect(() => {
     if (!tours.length || !containerRef.current) return;
@@ -135,21 +137,47 @@ export function PanoramaViewer({ tours, className, onSceneChange }: Props) {
     onSceneChange?.(key);
   }, [onSceneChange]);
 
+  const isPortrait = () =>
+    typeof window !== "undefined" && window.matchMedia("(orientation: portrait)").matches;
+
   /**
-   * iOS Safari has no Fullscreen API for ordinary elements, so the reliable
-   * approach is a fixed overlay. Where the native API exists we also request
-   * it, purely to hide the browser chrome.
+   * A panorama wants a wide frame. Android lets us lock the screen to
+   * landscape once we are in native fullscreen; iOS Safari exposes neither the
+   * Fullscreen API for plain elements nor orientation locking, so there we
+   * rotate the overlay 90° with CSS instead. Both end up filling the screen.
    */
-  const enterFullscreen = useCallback(() => {
+  const enterFullscreen = useCallback(async () => {
     setFullscreen(true);
     document.body.style.overflow = "hidden";
+
     const el = wrapperRef.current;
-    if (el?.requestFullscreen) void el.requestFullscreen().catch(() => {});
+    let locked = false;
+
+    try {
+      if (el?.requestFullscreen) await el.requestFullscreen();
+      const orientation = screen.orientation as ScreenOrientation & {
+        lock?: (o: string) => Promise<void>;
+      };
+      if (orientation?.lock) {
+        await orientation.lock("landscape");
+        locked = true;
+      }
+    } catch {
+      locked = false;                       // unsupported or refused — fall back
+    }
+
+    setRotated(!locked && isPortrait());
   }, []);
 
   const exitFullscreen = useCallback(() => {
     setFullscreen(false);
+    setRotated(false);
     document.body.style.overflow = "";
+    try {
+      screen.orientation?.unlock?.();
+    } catch {
+      /* not supported — nothing to undo */
+    }
     if (document.fullscreenElement && document.exitFullscreen) {
       void document.exitFullscreen().catch(() => {});
     }
@@ -157,15 +185,24 @@ export function PanoramaViewer({ tours, className, onSceneChange }: Props) {
 
   const toggleFullscreen = useCallback(() => {
     if (fullscreen) exitFullscreen();
-    else enterFullscreen();
+    else void enterFullscreen();
   }, [fullscreen, enterFullscreen, exitFullscreen]);
 
-  // Pannellum needs a nudge after the container changes size.
+  // If the user physically turns the phone, drop the CSS rotation.
+  useEffect(() => {
+    if (!fullscreen) return;
+    const mq = window.matchMedia("(orientation: portrait)");
+    const onChange = () => setRotated((was) => (was ? mq.matches : was));
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, [fullscreen]);
+
+  // Pannellum needs a nudge after the container changes size or rotates.
   useEffect(() => {
     if (!ready) return;
-    const id = setTimeout(() => viewerRef.current?.resize?.(), 120);
-    return () => clearTimeout(id);
-  }, [fullscreen, ready]);
+    const ids = [80, 260, 600].map((ms) => setTimeout(() => viewerRef.current?.resize?.(), ms));
+    return () => ids.forEach(clearTimeout);
+  }, [fullscreen, rotated, ready]);
 
   // Escape, the Android back gesture and the native exit all close the overlay.
   useEffect(() => {
@@ -214,9 +251,21 @@ export function PanoramaViewer({ tours, className, onSceneChange }: Props) {
       ref={wrapperRef}
       className={cn(
         "relative overflow-hidden bg-neutral-950",
-        fullscreen ? "fixed inset-0 z-[80] h-[100dvh] w-screen" : "h-full w-full",
+        fullscreen ? "fixed inset-0 z-[80]" : "h-full w-full",
+        fullscreen && !rotated && "h-[100dvh] w-screen",
         className,
       )}
+      style={
+        rotated
+          ? {
+              // swap the axes and pivot around the top-left corner
+              width: "100dvh",
+              height: "100vw",
+              transform: "rotate(90deg) translateY(-100%)",
+              transformOrigin: "top left",
+            }
+          : undefined
+      }
     >
       {/* touch-none keeps pinch and drag inside the viewer instead of scrolling the page */}
       <div ref={containerRef} className="h-full w-full touch-none" onDoubleClick={toggleZoom} />
@@ -241,7 +290,7 @@ export function PanoramaViewer({ tours, className, onSceneChange }: Props) {
           onClick={enterFullscreen}
           className="absolute bottom-[max(4.75rem,calc(env(safe-area-inset-bottom)+4rem))] left-1/2 -translate-x-1/2 rounded-full border border-white/15 bg-black/45 px-4 py-2 text-xs font-medium text-white/90 backdrop-blur-xl sm:hidden"
         >
-          Бүтэн дэлгэцээр үзэх
+          Хэвтээгээр бүтэн дэлгэц
         </button>
       )}
 

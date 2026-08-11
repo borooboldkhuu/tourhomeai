@@ -17,6 +17,13 @@ export type Mat3 = Float64Array; // row-major, world = R · camera
 
 const DEG = Math.PI / 180;
 
+/**
+ * Per-channel difference above which a frame is assumed to be looking at
+ * something that moved, and is therefore kept out of the low-frequency
+ * average so a passer-by cannot tint the whole region.
+ */
+const MOTION_TOLERANCE = 60;
+
 /* ------------------------------------------------------------------ math -- */
 
 /**
@@ -151,9 +158,21 @@ export class EquirectStitcher {
   readonly height: number;
   private rgb: Uint8ClampedArray;
   private weight: Uint8Array;
+  /**
+   * Low-frequency accumulator at 1/4 resolution. Detail always comes from a
+   * single frame (so a person who moved appears once, not twice), while the
+   * slow brightness and colour drift between frames is averaged here and
+   * folded back in at the end. That is what makes the seams disappear.
+   */
+  private lowW: number;
+  private lowH: number;
+  private lowSum: Float32Array;
+  private lowWeight: Float32Array;
   frames = 0;
   /** Degrees of gyro drift removed from the last frame. */
   lastCorrectionDeg = 0;
+  /** 0–1: how much of the last frame landed on already-captured pixels. */
+  lastOverlap = 0;
   private corrections: number[] = [];
 
   private opts: { refine: boolean; matchExposure: boolean };
@@ -165,10 +184,28 @@ export class EquirectStitcher {
     const n = this.width * this.height;
     this.rgb = new Uint8ClampedArray(n * 4);
     this.weight = new Uint8Array(n);
+
+    this.lowW = this.width >> 2;
+    this.lowH = this.height >> 2;
+    this.lowSum = new Float32Array(this.lowW * this.lowH * 3);
+    this.lowWeight = new Float32Array(this.lowW * this.lowH);
     // neutral dark fill for regions the user never covered
     for (let i = 0; i < n; i++) {
       this.rgb[i * 4] = 26; this.rgb[i * 4 + 1] = 26; this.rgb[i * 4 + 2] = 28; this.rgb[i * 4 + 3] = 255;
     }
+  }
+
+  /** Wipes the sphere so the same instance can composite a second time. */
+  clear() {
+    const n = this.width * this.height;
+    this.weight.fill(0);
+    this.lowSum.fill(0);
+    this.lowWeight.fill(0);
+    for (let i = 0; i < n; i++) {
+      this.rgb[i * 4] = 26; this.rgb[i * 4 + 1] = 26; this.rgb[i * 4 + 2] = 28; this.rgb[i * 4 + 3] = 255;
+    }
+    this.frames = 0;
+    this.corrections = [];
   }
 
   /** Average drift correction applied so far, in degrees. */
@@ -199,6 +236,7 @@ export class EquirectStitcher {
    * @param hFovDeg horizontal field of view of the phone camera
    */
   addFrame(frame: ImageData, r: Mat3, hFovDeg: number) {
+    if (this.frames === 0) this.lastOverlap = 1;
     const aligned =
       this.frames === 0 || (!this.opts.refine && !this.opts.matchExposure)
         ? { r, gain: [1, 1, 1] as const, shift: 0 }
@@ -265,7 +303,9 @@ export class EquirectStitcher {
       return { ncc: (sab - (sa * sb) / n) / Math.sqrt(va * vb), n };
     };
 
-    let best = { r, ncc: score(r).ncc, dy: 0, dp: 0 };
+    const first = score(r);
+    this.lastOverlap = Math.min(1, first.n / pts.length);
+    let best = { r, ncc: first.ncc, dy: 0, dp: 0 };
     if (best.ncc < -1) {
       return { r, gain: [1, 1, 1] as const, shift: 0 };   // no usable overlap
     }
@@ -406,15 +446,30 @@ export class EquirectStitcher {
 
         const oi = (rowOut + px) * 4;
         const prev = this.weight[rowOut + px];
-        const a = w / (w + prev + 1);
+
+        const wins = w > prev;
+
+        // low band: every agreeing frame contributes, weighted by its feather
+        const lowIdx = ((py >> 2) * this.lowW + (px >> 2)) * 3;
+        const fw01 = w / 255;
+        let lowCounted = false;
 
         for (let c = 0; c < 3; c++) {
           const s =
             (src[i00 + c] * w00 + src[i10 + c] * w10 + src[i01 + c] * w01 + src[i11 + c] * w11) *
             gain[c];
-          this.rgb[oi + c] += (s - this.rgb[oi + c]) * a;
+
+          // detail band: the single best frame wins outright — no averaging,
+          // so moving objects cannot leave a second copy behind
+          if (wins) this.rgb[oi + c] = s;
+
+          if (wins || prev === 0 || Math.abs(s - this.rgb[oi + c]) < MOTION_TOLERANCE) {
+            this.lowSum[lowIdx + c] += s * fw01;
+            lowCounted = true;
+          }
         }
-        if (w > prev) this.weight[rowOut + px] = w;
+        if (lowCounted) this.lowWeight[(py >> 2) * this.lowW + (px >> 2)] += fw01;
+        if (wins) this.weight[rowOut + px] = w;
       }
     }
     this.frames++;
@@ -473,7 +528,69 @@ export class EquirectStitcher {
     cap(false);
   }
 
+  /**
+   * Replaces each pixel's low frequencies with the blended average, keeping
+   * its own detail. Equalises exposure and white balance across the whole
+   * sphere; the correction is capped so a moving object cannot smear.
+   */
+  private applyLowBandCorrection(limit = 42) {
+    const { width: W, height: H, lowW: LW, lowH: LH } = this;
+
+    // the winner image's own low band, box-downsampled
+    const win = new Float32Array(LW * LH * 3);
+    const cnt = new Float32Array(LW * LH);
+    for (let y = 0; y < H; y++) {
+      const ly = y >> 2;
+      for (let x = 0; x < W; x++) {
+        if (!this.weight[y * W + x]) continue;
+        const li = (ly * LW + (x >> 2)) * 3;
+        const oi = (y * W + x) * 4;
+        win[li] += this.rgb[oi];
+        win[li + 1] += this.rgb[oi + 1];
+        win[li + 2] += this.rgb[oi + 2];
+        cnt[ly * LW + (x >> 2)]++;
+      }
+    }
+
+    // difference map, sampled bilinearly back up to full resolution
+    const diff = new Float32Array(LW * LH * 3);
+    for (let i = 0; i < LW * LH; i++) {
+      const wgt = this.lowWeight[i], n = cnt[i];
+      if (wgt < 0.001 || n < 1) continue;
+      for (let c = 0; c < 3; c++) {
+        const blended = this.lowSum[i * 3 + c] / wgt;
+        const own = win[i * 3 + c] / n;
+        diff[i * 3 + c] = Math.max(-limit, Math.min(limit, blended - own));
+      }
+    }
+
+    for (let y = 0; y < H; y++) {
+      const fy = Math.min(LH - 1.001, (y - 1.5) / 4);
+      const y0 = Math.max(0, Math.floor(fy)), ty = fy - y0;
+      const y1 = Math.min(LH - 1, y0 + 1);
+
+      for (let x = 0; x < W; x++) {
+        if (!this.weight[y * W + x]) continue;
+        const fx = (x - 1.5) / 4;
+        const x0 = ((Math.floor(fx) % LW) + LW) % LW, tx = fx - Math.floor(fx);
+        const x1 = (x0 + 1) % LW;
+
+        const i00 = (y0 * LW + x0) * 3, i10 = (y0 * LW + x1) * 3;
+        const i01 = (y1 * LW + x0) * 3, i11 = (y1 * LW + x1) * 3;
+        const oi = (y * W + x) * 4;
+
+        for (let c = 0; c < 3; c++) {
+          const d =
+            diff[i00 + c] * (1 - tx) * (1 - ty) + diff[i10 + c] * tx * (1 - ty) +
+            diff[i01 + c] * (1 - tx) * ty + diff[i11 + c] * tx * ty;
+          this.rgb[oi + c] += d;
+        }
+      }
+    }
+  }
+
   toCanvas(): HTMLCanvasElement {
+    this.applyLowBandCorrection();
     this.fillHoles();
     const canvas = document.createElement("canvas");
     canvas.width = this.width;

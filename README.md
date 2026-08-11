@@ -131,6 +131,8 @@ Deploy to Vercel: add the same four env vars, set `NEXT_PUBLIC_SITE_URL` to the 
 
 `src/components/tour/panorama-viewer.tsx` loads Pannellum 2.5.6 from CDN at runtime (no bundle cost), builds a multi-scene config from `property_tours`, and auto-links each room to the next so visitors can walk through. Custom glass controls replace the default chrome; every scene change fires an analytics event.
 
+Fullscreen is a fixed overlay rather than the Fullscreen API, because iOS Safari does not expose that API for ordinary elements; where the native API exists it is requested as well, only to hide the browser chrome. The viewer container sets `touch-action: none` so pinch and drag stay inside the panorama instead of scrolling the page, and Pannellum is resized after the container changes size.
+
 `src/components/tour/three-viewer.tsx` is a self-contained Three.js equirectangular renderer (inverted sphere + drag-look + wheel zoom) available as an alternative renderer for single-panorama previews.
 
 Panoramas must be **equirectangular 2:1**. The uploader checks the aspect ratio client-side and warns before upload.
@@ -147,14 +149,19 @@ The gyroscope supplies the camera pose for every frame (`DeviceOrientationEvent`
 
 Quality work happens in three places:
 
-- **Capture** — the camera is requested at up to 2560×1440 and frames are used at native size (capped at 1600 px); the sphere is built at 4096×2048 when the device can hold it, which is what makes zooming in the viewer worthwhile. Exposure, white balance and focus are locked once the stream settles; frames are only taken after two consecutive steady readings and must pass a variance-of-Laplacian sharpness gate, so motion blur never reaches the stitcher.
+- **Capture** — frames must pass four gates before they reach the stitcher: sharpness (variance of Laplacian), exposure (mean brightness and clipped-highlight share), aim (within 12° of an uncaptured target) and steadiness (two consecutive calm readings). Overlap with the existing sphere is measured per frame and the user is told to slow down when it drops below 12 %. Live coverage is shown as a percentage. The camera is requested at up to 2560×1440 and frames are used at native size (capped at 1600 px); the sphere is built at 4096×2048 when the device can hold it, which is what makes zooming in the viewer worthwhile. Exposure, white balance and focus are locked once the stream settles; frames are only taken after two consecutive steady readings and must pass a variance-of-Laplacian sharpness gate, so motion blur never reaches the stitcher.
+- **Blend** — two-band compositing: detail comes from a single winning frame (so a person who moved cannot appear twice), while the low frequencies are averaged across every contributing frame in a quarter-resolution buffer and folded back at the end, capped at ±42 levels. This removes the brightness and colour steps at frame boundaries without softening detail, for 2 MB of extra memory.
+- **Tone** — a local tone-mapping pass lifts shadows using a heavily blurred luminance map, so furniture and floor detail survive in dark corners. Highlight recovery is deliberately **off**: a window that clipped to white holds nothing to recover, and pulling it down only flattens the contrast that is there. Measured on a darkened room: shadow detail +20 %, shadow luminance 47 → 59, window untouched (28.9 → 27.7 detail, 217 → 219 luminance).
+- **Metadata** — GPano XMP is injected into the JPEG so Facebook, Google Photos and desktop viewers open it as a real 360° photo rather than a wide picture.
 - **Stitch** — every frame after the first is re-aligned against what is already on the sphere by maximising normalised cross-correlation over a three-stage yaw/pitch search (±3° → 0.07°), which cancels gyroscope drift; a per-channel gain then matches its exposure to the overlap. Sampling is bilinear and the poles are capped from the nearest captured colour.
 - **Finish** — an edge-aware denoise plus mild unsharp mask (`src/lib/enhance.ts`), plus zero-config on-device 2× super-resolution: ESRGAN-slim (MIT, 900 KB of weights) is pulled from jsDelivr and run with TensorFlow.js in overlapping tiles, so nothing is uploaded and no API key exists. It only fires when the sphere is ≤2048 wide — a 4096 capture is already sharper than the model could make it.
 
 **Verified offline:**
 
 - Clean replay of 18 synthetic frames reconstructs the source panorama at **0.94/255** mean error, 98.5 % coverage — the projection math is exact.
-- With ±2.5° gyro noise and ±15 % per-channel exposure swings injected, drift and exposure correction cut the error from **12.79 → 7.06/255 (45 % better)** in 809 ms for 18 frames; visually it is the difference between doubled window frames with colour blotches and a clean room.
+- With ±2.5° gyro noise and ±15 % per-channel exposure swings injected over 18 frames, mean error against ground truth falls **12.65 → 4.26/255, a 66 % reduction**, in 812 ms and 2 MB of extra memory. The intermediate stage (drift + gain correction, feathered blending) measured 7.06; two-band compositing took it the rest of the way. Visually: the baseline shows pink and green blotches with doubled windows, frames and doors; the result is a clean, evenly lit room.
+- A ghost-suppression heuristic on winner selection was implemented, measured against a synthetic moving person, showed **no improvement**, and was removed rather than shipped unmeasured; only the low-band exclusion of disagreeing samples was kept. Removing duplicate objects properly needs global seam labelling, which is not implemented.
+- GPano injection verified end to end — the tag is present, the file still decodes as a valid 2048×1024 JPEG, and the XMP block is readable by an independent decoder (653 bytes added).
 - The clean-up pass recovers **32 %** of the error on a blurred, noisy panorama; after switching the bilateral weight to a lookup table and the unsharp blur to a separable pass it runs **2.6× faster** — 0.5 s at 2048×1024, 1.7 s at 4096×2048. Denoise/sharpen/levels settings were chosen by sweeping 32 combinations against ground truth — auto-levels measurably hurt and is off by default.
 
 Real-world quality still depends on gyroscope accuracy and on the user rotating around the camera rather than around their body; neither can be measured without a device.
@@ -231,10 +238,26 @@ Pinned to **Next.js 15.5.22**. The earlier 15.2.4 pin was affected by the May an
 
 **Never run `npm audit fix --force` here** — npm's proposed "fix" downgrades Next.js to 9.3.3.
 
+## 5.12 Social sharing
+
+`src/app/tour/[slug]/opengraph-image.tsx` renders a 1200×630 card with `next/og`: cover photo, title, price, area, room count and the 360° badge over a gradient. Cyrillic is covered by a 44 KB DejaVu subset in `public/fonts` — the default `ImageResponse` font cannot draw Mongolian.
+
+The share button offers Facebook, Messenger, Telegram, copy link and the native share sheet, and each records a `share` analytics event.
+
+**Verified:** the route was built and requested against a running production server — HTTP 200, `image/png`, 1200×630, Cyrillic rendering correctly in the fallback state.
+
+## 5.13 Operational safety net
+
+- `error.tsx` / `global-error.tsx` — a thrown server component no longer produces a blank page; the visitor gets a retry button and the error `digest` to quote.
+- `GET /api/health` — queries the database and reports `{ok, database, ms}`, 503 when it cannot. Pointed at a free uptime monitor it does double duty: it alerts on outages **and** keeps a free-tier Supabase project from pausing after a week of inactivity, which would otherwise take every published tour offline.
+- `robots.ts` now also blocks `/admin/`.
+
+**Verified:** the health route was requested against a running production build with an unreachable database — it correctly returned 503 with a diagnostic body instead of throwing.
+
 ## 6. Verification performed
 
 - `tsc --noEmit` → **0 errors**
-- `next build` → **32 routes compiled**, ESLint and type validation passed
+- `next build` → **34 routes compiled**, ESLint and type validation passed
 - Panorama stitcher round-trip test → **0.94/255 mean error**, 98.5 % coverage over 18 frames
 - wire.mn webhook signature + parsing suite → **17/17 assertions passed**
 - Stitcher under gyro + exposure noise → **45 % error reduction**; clean-up pass → **32 % error reduction**

@@ -12,6 +12,15 @@
  */
 
 export interface EnhanceOptions {
+  /** Lift dark areas, 0–1. Recovers furniture and floor detail in shadow. */
+  shadows?: number;
+  /**
+   * Pull back bright areas, 0–1. Off by default: a window that clipped to
+   * white holds no detail to recover, and pulling it down only flattens the
+   * contrast that is there. Only useful with bracketed exposures, which the
+   * browser cannot give us.
+   */
+  highlights?: number;
   /** Edge-preserving noise reduction, 0–1. */
   denoise?: number;
   /** Unsharp mask amount, 0–1.5. */
@@ -26,7 +35,9 @@ export interface EnhanceOptions {
  * auto-levels made things measurably worse on scenes with bright windows,
  * so it is off unless asked for.
  */
-const DEFAULTS: Required<EnhanceOptions> = { denoise: 0.9, sharpen: 0.3, autoLevels: false };
+const DEFAULTS: Required<EnhanceOptions> = {
+  denoise: 0.9, sharpen: 0.3, autoLevels: false, shadows: 0.35, highlights: 0,
+};
 
 /** Luma of a pixel, used by both the denoiser and the sharpener. */
 function luma(d: Uint8ClampedArray, i: number) {
@@ -103,6 +114,73 @@ export function enhanceImageData(img: ImageData, options: EnhanceOptions = {}): 
         for (let ch = 0; ch < 3; ch++) {
           const blur = (tmp[up + ch] + tmp[t + ch] + tmp[dn + ch]) / 3;
           out[c + ch] = base[c + ch] + (base[c + ch] - blur) * o.sharpen;
+        }
+      }
+    }
+  }
+
+  // ---- 2.5 local tone mapping: keep window and shadow detail ----
+  //
+  // A room with a window spans far more dynamic range than a phone sensor can
+  // hold in one exposure, and the browser gives us no bracketing. What we can
+  // do is compress the range locally: build a heavily blurred luminance map
+  // and use it to lift only the areas that are dark and pull back only the
+  // areas that are blown. The blur radius is deliberately large so edges do
+  // not get the bright outline that makes cheap HDR look fake.
+  if (o.shadows > 0 || o.highlights > 0) {
+    const LW = Math.max(1, W >> 3), LH = Math.max(1, H >> 3);
+    const small = new Float32Array(LW * LH);
+    const cnt = new Float32Array(LW * LH);
+
+    for (let y = 0; y < H; y++) {
+      const ly = (y >> 3) * LW;
+      for (let x = 0; x < W; x++) {
+        const i = (y * W + x) * 4;
+        small[ly + (x >> 3)] += out[i] * 0.299 + out[i + 1] * 0.587 + out[i + 2] * 0.114;
+        cnt[ly + (x >> 3)]++;
+      }
+    }
+    for (let i = 0; i < small.length; i++) if (cnt[i]) small[i] /= cnt[i];
+
+    // separable box blur on the small map — cheap and halo-free
+    const tmp = new Float32Array(small.length);
+    const R = 3;
+    for (let y = 0; y < LH; y++) {
+      for (let x = 0; x < LW; x++) {
+        let sum = 0, n = 0;
+        for (let d = -R; d <= R; d++) {
+          const xx = ((x + d) % LW + LW) % LW;
+          sum += small[y * LW + xx]; n++;
+        }
+        tmp[y * LW + x] = sum / n;
+      }
+    }
+    for (let x = 0; x < LW; x++) {
+      for (let y = 0; y < LH; y++) {
+        let sum = 0, n = 0;
+        for (let d = -R; d <= R; d++) {
+          const yy = Math.min(LH - 1, Math.max(0, y + d));
+          sum += tmp[yy * LW + x]; n++;
+        }
+        small[y * LW + x] = sum / n;
+      }
+    }
+
+    for (let y = 0; y < H; y++) {
+      const ly = Math.min(LH - 1, y >> 3) * LW;
+      for (let x = 0; x < W; x++) {
+        const base = small[ly + Math.min(LW - 1, x >> 3)] / 255;   // 0–1 local level
+        // how much to move this pixel: strongest in deep shadow / blown highlight
+        const liftShadow = o.shadows * Math.pow(1 - base, 2.2);
+        const pullHigh = o.highlights * Math.pow(base, 3.0);
+        const factor = 1 + liftShadow - pullHigh;
+        if (Math.abs(factor - 1) < 0.003) continue;
+
+        const i = (y * W + x) * 4;
+        for (let c = 0; c < 3; c++) {
+          const v = out[i + c];
+          // apply in a soft-clip curve so nothing posterises at the top end
+          out[i + c] = 255 * (1 - Math.pow(1 - Math.min(1, (v / 255) * factor), 1.02));
         }
       }
     }

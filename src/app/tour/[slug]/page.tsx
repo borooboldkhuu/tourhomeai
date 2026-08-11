@@ -19,7 +19,7 @@ import { ViewTracker } from "@/components/tour/view-tracker";
 import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
 import { PROPERTY_TYPE_LABELS, SITE } from "@/lib/constants";
-import { formatPrice } from "@/lib/utils";
+import { absoluteUrl, formatPrice } from "@/lib/utils";
 import type { PropertyWithMedia, UserProfile } from "@/types/database.types";
 
 export const revalidate = 60;
@@ -131,9 +131,13 @@ export async function generateMetadata({
     openGraph: {
       title: property.title,
       description,
-      images: property.cover_image_url ? [{ url: property.cover_image_url }] : [],
       type: "website",
+      locale: "mn_MN",
+      siteName: SITE.name,
+      url: absoluteUrl(`/tour/${slug}`),
+      // opengraph-image.tsx renders the 1200×630 card Facebook shows
     },
+    twitter: { card: "summary_large_image", title: property.title, description },
   };
 }
 

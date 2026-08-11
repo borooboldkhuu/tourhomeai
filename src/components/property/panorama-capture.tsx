@@ -7,6 +7,7 @@ import {
   forwardOf, angleBetween, type CoverageTarget, type Mat3,
 } from "@/lib/pano-stitch";
 import { aiUpscale, aiUpscaleAvailable, enhanceCanvas } from "@/lib/enhance";
+import { addGPanoMetadata } from "@/lib/gpano";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
@@ -18,6 +19,8 @@ interface DeviceOrientationEventStatic {
 const AIM_TOLERANCE = 12 * (Math.PI / 180); // how close you must point at a target
 const STEADY_LIMIT = 1.1 * (Math.PI / 180); // max wobble per frame while capturing
 const SHARPNESS_MIN = 55;                   // variance of Laplacian on the grabbed frame
+const DARK_MEAN_MIN = 28;                   // below this the frame is mostly noise
+const BRIGHT_CLIP_MAX = 0.28;               // share of blown-out pixels we tolerate
 const STEADY_FRAMES = 2;                    // consecutive calm frames before we shoot
 const DEFAULT_HFOV = 65;
 
@@ -48,6 +51,7 @@ export function PanoramaCapture({
   const [hFov, setHFov] = useState(DEFAULT_HFOV);
   const [hint, setHint] = useState("");
   const [progress, setProgress] = useState("");
+  const [coverage, setCoverage] = useState(0);
   const steadyCountRef = useRef(0);
   const panoSizeRef = useRef(2048);
   const [panoSize, setPanoSize] = useState(2048);
@@ -165,6 +169,19 @@ export function PanoramaCapture({
     return sum2 / n - (sum / n) ** 2;
   }
 
+  /** Mean brightness and the share of clipped highlights. */
+  function exposure(data: ImageData) {
+    const d = data.data;
+    let sum = 0, clipped = 0, n = 0;
+    for (let i = 0; i < d.length; i += 64) {          // every 16th pixel is plenty
+      const l = d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114;
+      sum += l;
+      if (l > 250) clipped++;
+      n++;
+    }
+    return { mean: sum / n, clipped: clipped / n };
+  }
+
   function grabFrame(rel: Mat3): boolean {
     const video = videoRef.current;
     const canvas = grabRef.current;
@@ -187,8 +204,26 @@ export function PanoramaCapture({
       return false;
     }
 
+    const exp = exposure(pixels);
+    if (exp.mean < DARK_MEAN_MIN) {
+      setHint("Хэт харанхуй — гэрэл асаана уу");
+      return false;
+    }
+    if (exp.clipped > BRIGHT_CLIP_MAX) {
+      setHint("Гэрэл цайруулж байна — цонхноос бага зэрэг эргэнэ үү");
+      return false;
+    }
+
     stitcher.addFrame(pixels, rel, hFovRef.current);
-    setHint("");
+
+    // Frames that touch nothing already captured cannot be aligned, so warn
+    // rather than silently letting the panorama drift apart.
+    if (stitcher.frames > 1 && stitcher.lastOverlap < 0.12) {
+      setHint("Давхцал бага — арай удаан, тасралтгүй эргээрэй");
+    } else {
+      setHint("");
+    }
+    setCoverage(Math.round(stitcher.coverage * 100));
     navigator.vibrate?.(25);
     return true;
   }
@@ -331,7 +366,9 @@ export function PanoramaCapture({
       const blob: Blob = await new Promise((resolve, reject) =>
         canvas.toBlob((b) => (b ? resolve(b) : reject(new Error("toBlob"))), "image/jpeg", 0.92),
       );
-      const file = new File([blob], `360-${Date.now()}.jpg`, { type: "image/jpeg" });
+      // GPano tag so Facebook and Google treat this as a real 360° photo
+      const tagged = await addGPanoMetadata(blob, canvas.width, canvas.height);
+      const file = new File([tagged], `360-${Date.now()}.jpg`, { type: "image/jpeg" });
       stop();
       onCapture(file);
     } catch {
@@ -342,6 +379,7 @@ export function PanoramaCapture({
 
   function reset() {
     setHint("");
+    setCoverage(0);
     steadyCountRef.current = 0;
     stitcherRef.current = new EquirectStitcher(panoSizeRef.current);
     targetsRef.current = buildTargets();
@@ -416,7 +454,8 @@ export function PanoramaCapture({
             </button>
             <div className="absolute left-4 top-4 flex items-center gap-2 rounded-full bg-black/50 px-4 py-2 text-sm backdrop-blur">
               {done} / {total}
-              <span className="text-xs text-white/50">{panoSize === 4096 ? "· Өндөр чанар" : ""}</span>
+              {coverage > 0 && <span className="text-xs text-white/60">· {coverage}% бүрхэв</span>}
+              <span className="text-xs text-white/50">{panoSize === 4096 ? "· HD" : ""}</span>
             </div>
             {hint && (
               <div className="absolute left-1/2 top-4 -translate-x-1/2 rounded-full bg-amber-500/90 px-4 py-2 text-xs font-medium text-black">
